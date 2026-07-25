@@ -1,0 +1,6 @@
+{
+  "name": "OcuRisk",
+  "description": "AI smartphone-based eye-health screening & myopia progression risk engine with multi-modal photorefraction, accommodative lag & microsaccade analysis, and Gemini LLM health agent.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
