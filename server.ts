@@ -202,11 +202,17 @@ Screening Measurements:
 - BCEA Fixational Ellipse: ${session.microsaccade.bceaDeg2} deg²
 - 12-Month Myopia Progression Risk: ${session.riskResult.overallRiskPercent}% (${session.riskResult.riskCategory} Risk)
 
-Please format the summary in 4 markdown sections:
+Individual Eye Metrics:
+- OD (Right Eye): SE ${session.photorefraction.od?.sphericalEquivalentDiopters || session.photorefraction.sphericalEquivalentDiopters} D, Classification: ${session.photorefraction.od?.classification || session.photorefraction.classification}, BCEA: ${session.microsaccade.od?.bceaDeg2 || session.microsaccade.bceaDeg2} deg²
+- OS (Left Eye): SE ${session.photorefraction.os?.sphericalEquivalentDiopters || session.photorefraction.sphericalEquivalentDiopters} D, Classification: ${session.photorefraction.os?.classification || session.photorefraction.classification}, BCEA: ${session.microsaccade.os?.bceaDeg2 || session.microsaccade.bceaDeg2} deg²
+- Anisometropia: ${session.photorefraction.anisometropiaDelta || 'N/A'} D (${session.photorefraction.anisometropiaRisk || 'N/A'} Risk)
+
+Please format the summary in 5 markdown sections:
 1. Executive Summary & Plain Language Interpretation
-2. Key Risk Drivers (Behavioral, Genetic, Optical)
-3. Actionable Prevention Plan (20-20-20 rule, outdoor light, ergonomic recommendations)
-4. Key Questions to Ask Your Optometrist / Ophthalmologist
+2. Individual Eye Analysis (OD vs OS comparison, anisometropia assessment)
+3. Key Risk Drivers (Behavioral, Genetic, Optical)
+4. Actionable Prevention Plan (20-20-20 rule, outdoor light, ergonomic recommendations)
+5. Key Questions to Ask Your Optometrist / Ophthalmologist
 
 MANDATORY: You MUST include the text "Medical Disclaimer: OcuRisk is an AI screening tool, not a diagnostic device. Please consult a licensed eye care professional." at the bottom.`;
 

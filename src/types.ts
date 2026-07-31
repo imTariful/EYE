@@ -24,7 +24,7 @@ export interface PatientProfile {
   };
 }
 
-export interface PhotorefractionData {
+export interface EyeMetrics {
   pupilDiameterMm: number;
   redReflexIntensityRatio: number;
   crescentHeightRatio: number; // Crescent height relative to pupil radius
@@ -34,8 +34,6 @@ export interface PhotorefractionData {
   classification: 'EMMETROPIA' | 'MILD_MYOPIA' | 'MODERATE_MYOPIA' | 'HIGH_MYOPIA' | 'HYPEROPIA';
   confidenceScore: number; // 0-100%
   luminanceSlope?: number; // Dynamic luminance slope (dL/dx)
-  aaposRiskCategory?: 'EMMETROPIA' | 'MILD_MYOPIA' | 'MODERATE_MYOPIA' | 'HIGH_MYOPIA' | 'HYPEROPIA';
-  leukocoriaRisk?: 'NORMAL' | 'SUSPECT' | 'CRADLE_POSITIVE';
   rotationalAstigmatism?: {
     cylinderDiopters: number;
     axisDegrees: number;
@@ -44,7 +42,34 @@ export interface PhotorefractionData {
   };
 }
 
-export interface AccommodativeData {
+export interface PhotorefractionData {
+  // Combined metrics (legacy support)
+  pupilDiameterMm: number;
+  redReflexIntensityRatio: number;
+  crescentHeightRatio: number;
+  crescentOrientation: 'TOP' | 'BOTTOM' | 'SYMMETRIC';
+  sphericalEquivalentDiopters: number;
+  astigmatismCylinderDiopters: number;
+  classification: 'EMMETROPIA' | 'MILD_MYOPIA' | 'MODERATE_MYOPIA' | 'HIGH_MYOPIA' | 'HYPEROPIA';
+  confidenceScore: number;
+  luminanceSlope?: number;
+  aaposRiskCategory?: 'EMMETROPIA' | 'MILD_MYOPIA' | 'MODERATE_MYOPIA' | 'HIGH_MYOPIA' | 'HYPEROPIA';
+  leukocoriaRisk?: 'NORMAL' | 'SUSPECT' | 'CRADLE_POSITIVE';
+  rotationalAstigmatism?: {
+    cylinderDiopters: number;
+    axisDegrees: number;
+    j0: number;
+    j45: number;
+  };
+  // Individual eye metrics (OD = Right Eye, OS = Left Eye)
+  od?: EyeMetrics; // Right Eye (Oculus Dexter)
+  os?: EyeMetrics; // Left Eye (Oculus Sinister)
+  // Anisometropia detection
+  anisometropiaDelta?: number; // Difference in SE between eyes
+  anisometropiaRisk?: 'LOW' | 'MODERATE' | 'HIGH';
+}
+
+export interface AccommodativeEyeMetrics {
   npcCm: number; // Near Point of Convergence in cm (Normal: < 6-8 cm)
   accommodativeLagDiopters: number; // Accommodative lag in Diopters (Normal: +0.25 to +0.75 D)
   fatigueIndex: number; // 0 - 100
@@ -53,18 +78,51 @@ export interface AccommodativeData {
   accommodativeSlopeShift?: number; // Slope shift during near-target approach
 }
 
+export interface AccommodativeData {
+  // Combined metrics (legacy support)
+  npcCm: number; // Near Point of Convergence in cm (Normal: < 6-8 cm)
+  accommodativeLagDiopters: number; // Accommodative lag in Diopters (Normal: +0.25 to +0.75 D)
+  fatigueIndex: number; // 0 - 100
+  constrictionVelocityMmSec: number; // Pupil constriction speed
+  responseLatencyMs: number;
+  accommodativeSlopeShift?: number; // Slope shift during near-target approach
+  // Individual eye metrics (OD = Right Eye, OS = Left Eye)
+  od?: AccommodativeEyeMetrics; // Right Eye (Oculus Dexter)
+  os?: AccommodativeEyeMetrics; // Left Eye (Oculus Sinister)
+}
+
 export interface FixationPoint {
   x: number; // horizontal displacement in degrees
   y: number; // vertical displacement in degrees
 }
 
-export interface MicrosaccadeData {
-  bceaDeg2: number; // Bivariate Contour Ellipse Area in deg^2 (Kalman smoothed)
+export interface MicrosaccadeEyeMetrics {
+  bceaDeg2: number; // Bivariate Contour Ellipse Area in deg^2 (Savitzky-Golay smoothed)
   rawBceaDeg2?: number; // Raw unsmoothed BCEA in deg^2
+  bceaConfidenceLevel?: number; // 1-sigma (68.27%) or 2-sigma (95.45%)
   fixationStabilityScore: number; // 0 - 100
   microsaccadeFrequencyHz: number;
   fixationPoints: FixationPoint[];
   amblyopiaRisk: 'LOW' | 'MODERATE' | 'HIGH';
+}
+
+export interface MicrosaccadeData {
+  // Combined metrics (legacy support)
+  bceaDeg2: number; // Bivariate Contour Ellipse Area in deg^2 (Savitzky-Golay smoothed)
+  rawBceaDeg2?: number; // Raw unsmoothed BCEA in deg^2
+  bceaConfidenceLevel?: number; // 1-sigma (68.27%) or 2-sigma (95.45%)
+  fixationStabilityScore: number; // 0 - 100
+  microsaccadeFrequencyHz: number;
+  fixationPoints: FixationPoint[];
+  amblyopiaRisk: 'LOW' | 'MODERATE' | 'HIGH';
+  // Individual eye fixation data
+  odFixationPoints?: FixationPoint[]; // Right eye fixation
+  osFixationPoints?: FixationPoint[]; // Left eye fixation
+  odBceaDeg2?: number; // Right eye BCEA
+  osBceaDeg2?: number; // Left eye BCEA
+  // Individual eye metrics (OD = Right Eye, OS = Left Eye)
+  od?: MicrosaccadeEyeMetrics; // Right Eye (Oculus Dexter)
+  os?: MicrosaccadeEyeMetrics; // Left Eye (Oculus Sinister)
 }
 
 export interface FeatureContribution {

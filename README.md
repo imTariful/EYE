@@ -11,10 +11,17 @@ OcuRisk transforms standard smartphone camera hardware into an AI-powered ophtha
 ## Features
 
 - **AI Photorefraction:** Analyzes pupil red reflex and crescent height patterns to estimate spherical equivalent refractive error
+- **Individual Eye Reporting:** Separate OD (Right Eye) and OS (Left Eye) metrics for comprehensive analysis
+- **Anisometropia Detection:** Automatic detection and risk assessment of refractive asymmetry between eyes
 - **Accommodative Testing:** Tracks Near Point of Convergence (NPC) and accommodative lag to detect eye strain
-- **Microsaccade BCEA:** Computes Bivariate Contour Ellipse Area from fixational microsaccades
+- **Microsaccade BCEA:** Computes Bivariate Contour Ellipse Area from fixational microsaccades using Savitzky-Golay smoothing
 - **Bayesian Fusion Engine:** Synthesizes physical scans with genetic factors and behavioral habits
 - **Visual Acuity Testing:** Digital Snellen E-chart for distance vision assessment
+- **Media Upload:** Support for uploading images and videos for offline photorefraction analysis with blur detection
+- **Quality Indicators:** Real-time feedback on lighting, fixation stability, and focus quality during scans
+- **Navigation Guards:** Step validation ensuring minimum stable frames and quality thresholds before proceeding
+- **Medical Terminology Translation:** Patient-friendly explanations of clinical terms
+- **Corrected Myopia Prediction:** Li et al. 2024 model with accurate SE coefficient and age-based decay for 5-year trajectories
 - **Thibos Power Vector Optics:** Converts between prescription formats and power vectors
 
 ## Prerequisites

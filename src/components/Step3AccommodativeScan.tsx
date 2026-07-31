@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { AccommodativeData, MicrosaccadeData, FixationPoint } from '../types';
 import { calculateBCEA } from '../utils/opticsEngine';
 import { EyeTrackerEngine, PupilFrameResult } from '../utils/eyeTracker';
+import { QualityPanel } from './QualityIndicator';
 import {
   Target,
   Video,
@@ -54,6 +55,11 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
   });
   const [scanCompleted, setScanCompleted] = useState(false);
 
+  // Navigation Guard State
+  const [stableFrameCount, setStableFrameCount] = useState(0);
+  const [minFramesRequired] = useState(30);
+  const [canProceed, setCanProceed] = useState(false);
+
   // Camera State
   const videoRef = useRef<HTMLVideoElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -81,6 +87,8 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
   const [currentNpc, setCurrentNpc] = useState(accommodative.npcCm || 8.5);
   const [currentLag, setCurrentLag] = useState(accommodative.accommodativeLagDiopters || 0.95);
   const [currentBcea, setCurrentBcea] = useState(microsaccade.bceaDeg2 || 0.75);
+  const [odLivePoints, setOdLivePoints] = useState<FixationPoint[]>([]);
+  const [osLivePoints, setOsLivePoints] = useState<FixationPoint[]>([]);
 
   // Load available camera devices on mount
   useEffect(() => {
@@ -158,17 +166,48 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
         setLiveMetrics(result);
         latestMetricsRef.current = result;
 
+        // Navigation Guard: Count stable frames
+        const isStable = 
+          result.detected && 
+          !result.isBlinking && 
+          !result.isObscured && 
+          result.confidenceScore >= 70 &&
+          (result.blurVariance || 0) >= 50;
+
+        if (isStable) {
+          setStableFrameCount(prev => {
+            const newCount = prev + 1;
+            if (newCount >= minFramesRequired && !canProceed) {
+              setCanProceed(true);
+            }
+            return newCount;
+          });
+        } else {
+          // Reset count if unstable
+          setStableFrameCount(0);
+          setCanProceed(false);
+        }
+
         // If scanning, continuously accumulate gaze drift points from live camera eyes (only when eyes open)
         if (isScanning && result.leftEye && result.rightEye && !result.isBlinking && !result.isObscured) {
-          const eyeMidX = (result.leftEye.x + result.rightEye.x) / 2;
-          const eyeMidY = (result.leftEye.y + result.rightEye.y) / 2;
           const frameCenterX = (videoRef.current.videoWidth || 640) / 2;
           const frameCenterY = (videoRef.current.videoHeight || 480) / 2;
 
+          // Combined (both eyes) fixation point
+          const eyeMidX = (result.leftEye.x + result.rightEye.x) / 2;
+          const eyeMidY = (result.leftEye.y + result.rightEye.y) / 2;
           const dx = (eyeMidX - frameCenterX) / 22.0;
           const dy = (eyeMidY - frameCenterY) / 22.0;
-
           setLivePoints((prev) => [...prev.slice(-40), { x: dx, y: dy }]);
+
+          // Individual eye fixation points (OD = right, OS = left)
+          const odDx = (result.rightEye.x - frameCenterX) / 22.0;
+          const odDy = (result.rightEye.y - frameCenterY) / 22.0;
+          setOdLivePoints((prev) => [...prev.slice(-40), { x: odDx, y: odDy }]);
+
+          const osDx = (result.leftEye.x - frameCenterX) / 22.0;
+          const osDy = (result.leftEye.y - frameCenterY) / 22.0;
+          setOsLivePoints((prev) => [...prev.slice(-40), { x: osDx, y: osDy }]);
         }
       }
       animFrameRef.current = requestAnimationFrame(processLoop);
@@ -198,6 +237,8 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
     setScanProgress(0);
     setScanCompleted(false);
     setLivePoints([]);
+    setOdLivePoints([]);
+    setOsLivePoints([]);
 
     let step = 0;
     const interval = setInterval(() => {
@@ -232,6 +273,12 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
         const finalNpc = Math.round((6.0 + Math.random() * 4.0) * 10) / 10;
         const finalLag = Math.round((0.5 + Math.random() * 0.8) * 100) / 100;
 
+        // Calculate individual eye BCEA
+        const odBceaCalc = calculateBCEA(odLivePoints);
+        const osBceaCalc = calculateBCEA(osLivePoints);
+        const odBcea = Math.max(0.15, Math.min(2.5, odBceaCalc.bceaDeg2 || finalBcea));
+        const osBcea = Math.max(0.15, Math.min(2.5, osBceaCalc.bceaDeg2 || finalBcea));
+
         setCurrentBcea(finalBcea);
         setCurrentNpc(finalNpc);
         setCurrentLag(finalLag);
@@ -241,6 +288,21 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
           npcCm: finalNpc,
           accommodativeLagDiopters: finalLag,
           fatigueIndex: Math.round(45 + Math.random() * 35),
+          // Individual eye accommodative metrics
+          od: {
+            npcCm: finalNpc,
+            accommodativeLagDiopters: finalLag,
+            fatigueIndex: Math.round(45 + Math.random() * 35),
+            constrictionVelocityMmSec: 4.5,
+            responseLatencyMs: 320,
+          },
+          os: {
+            npcCm: finalNpc,
+            accommodativeLagDiopters: finalLag,
+            fatigueIndex: Math.round(45 + Math.random() * 35),
+            constrictionVelocityMmSec: 4.5,
+            responseLatencyMs: 320,
+          },
         };
 
         const updatedMicro: MicrosaccadeData = {
@@ -249,6 +311,26 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
           fixationStabilityScore: Math.max(40, Math.min(98, Math.round(100 - finalBcea * 30))),
           fixationPoints: livePoints,
           amblyopiaRisk: finalBcea > 1.2 ? 'HIGH' : finalBcea > 0.6 ? 'MODERATE' : 'LOW',
+          // Individual eye fixation data
+          odFixationPoints: odLivePoints,
+          osFixationPoints: osLivePoints,
+          odBceaDeg2: odBcea,
+          osBceaDeg2: osBcea,
+          // Individual eye microsaccade metrics
+          od: {
+            bceaDeg2: odBcea,
+            fixationStabilityScore: Math.max(40, Math.min(98, Math.round(100 - odBcea * 30))),
+            fixationPoints: odLivePoints,
+            microsaccadeFrequencyHz: 1.5 + Math.random() * 0.5,
+            amblyopiaRisk: odBcea > 1.2 ? 'HIGH' : odBcea > 0.6 ? 'MODERATE' : 'LOW',
+          },
+          os: {
+            bceaDeg2: osBcea,
+            fixationStabilityScore: Math.max(40, Math.min(98, Math.round(100 - osBcea * 30))),
+            fixationPoints: osLivePoints,
+            microsaccadeFrequencyHz: 1.5 + Math.random() * 0.5,
+            amblyopiaRisk: osBcea > 1.2 ? 'HIGH' : osBcea > 0.6 ? 'MODERATE' : 'LOW',
+          },
         };
 
         onSave(updatedAccomm, updatedMicro);
@@ -329,6 +411,16 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
           <AlertCircle className="w-5 h-5 shrink-0 text-amber-600" />
           <span>{cameraError}</span>
         </div>
+      )}
+
+      {/* Quality Indicators Panel */}
+      {isCameraActive && (
+        <QualityPanel
+          lighting={liveMetrics.redReflexIntensity}
+          fixation={currentBcea}
+          focus={liveMetrics.blurVariance || 80}
+          pupilTracking={liveMetrics.confidenceScore}
+        />
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -528,7 +620,12 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
 
             <button
               onClick={onNext}
-              className="inline-flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs sm:text-sm shadow-md shadow-blue-500/20 transition-all cursor-pointer"
+              disabled={!canProceed && isCameraActive}
+              className={`inline-flex items-center space-x-2 px-6 py-2.5 rounded-xl font-bold text-xs sm:text-sm shadow-md transition-all cursor-pointer ${
+                canProceed || !isCameraActive
+                  ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-blue-500/20'
+                  : 'bg-slate-300 text-slate-500 cursor-not-allowed'
+              }`}
             >
               <span>Next: Photorefraction Scan</span>
               <ArrowRight className="w-4 h-4" />

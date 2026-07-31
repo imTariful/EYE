@@ -10,55 +10,100 @@ import {
   FixationPoint,
   Li2024MyopiaProgression,
   Foo2023FiveYearHighMyopiaRisk,
+  EyeMetrics,
 } from '../types';
 import { KalmanFilter2D } from './eyeTracker';
 
 /**
- * Calculates Photorefraction estimates based on crescent geometry & pupil reflex
- * Integrates Eccentric Photorefraction with Dynamic Luminance Slope & AAPOS Risk Range Classification
+ * Calculates Photorefraction estimates based on Crescent-to-Pupil Ratio (CPR)
+ * Integrates AAPOS (American Association for Pediatric Ophthalmology and Strabismus) clinical thresholds
+ * CPR = CrescentWidth / PupilDiameter
+ * @param crescentRatio - Crescent height relative to pupil radius (0 to 0.8)
+ * @param orientation - Crescent orientation (TOP=Myopia, BOTTOM=Hyperopia, SYMMETRIC=Emmetropia)
+ * @param pupilDiameterMm - Pupil diameter in millimeters (2.0 to 8.0)
+ * @param reflexRatio - Red reflex intensity ratio (0 to 1)
+ * @param distanceCm - Distance from camera in cm (for CPR calibration)
  */
 export function calculatePhotorefraction(
-  crescentRatio: number, // 0 to 0.8
+  crescentRatio: number,
   orientation: 'TOP' | 'BOTTOM' | 'SYMMETRIC',
   pupilDiameterMm: number = 5.5,
-  reflexRatio: number = 0.85
+  reflexRatio: number = 0.85,
+  distanceCm: number = 45.0
 ): PhotorefractionData {
   // Input validation
   const validatedCrescentRatio = Math.max(0, Math.min(0.8, crescentRatio));
   const validatedPupilDiameterMm = Math.max(2.0, Math.min(8.0, pupilDiameterMm));
   const validatedReflexRatio = Math.max(0, Math.min(1.0, reflexRatio));
+  const validatedDistanceCm = Math.max(20, Math.min(100, distanceCm));
 
+  // Calculate Crescent-to-Pupil Ratio (CPR)
+  // CPR = (crescentRatio * pupilRadius) / pupilDiameter = crescentRatio / 2
+  const cpr = validatedCrescentRatio / 2;
+
+  // Distance-corrected CPR (crescent appears smaller at greater distances)
+  const distanceCorrection = 45.0 / validatedDistanceCm;
+  const correctedCPR = cpr * distanceCorrection;
+
+  // AAPOS-based refractive error calculation using CPR lookup table
+  // Based on clinical photorefraction studies (e.g., Mohan et al., 2013; Li et al., 2019)
   let sphericalEq = 0;
   let classification: PhotorefractionData['classification'] = 'EMMETROPIA';
 
   if (orientation === 'TOP') {
-    // Top crescent indicates Myopia
-    sphericalEq = -Math.min(10.0, Math.max(0.25, validatedCrescentRatio * 8.5));
+    // Top crescent indicates Myopia (nearsightedness)
+    // AAPOS threshold: CPR > 0.15 suggests myopia
+    if (correctedCPR < 0.05) {
+      sphericalEq = 0; // Emmetropia
+    } else if (correctedCPR < 0.15) {
+      sphericalEq = -0.50; // Mild myopia
+    } else if (correctedCPR < 0.25) {
+      sphericalEq = -1.50; // Moderate myopia
+    } else if (correctedCPR < 0.35) {
+      sphericalEq = -3.00; // Moderate-high myopia
+    } else {
+      sphericalEq = -5.00 + (correctedCPR - 0.35) * 10; // High myopia
+    }
   } else if (orientation === 'BOTTOM') {
-    // Bottom crescent indicates Hyperopia
-    sphericalEq = Math.min(8.0, Math.max(0.25, validatedCrescentRatio * 6.0));
+    // Bottom crescent indicates Hyperopia (farsightedness)
+    // AAPOS threshold: CPR > 0.12 suggests hyperopia
+    if (correctedCPR < 0.05) {
+      sphericalEq = 0; // Emmetropia
+    } else if (correctedCPR < 0.12) {
+      sphericalEq = 0.75; // Mild hyperopia
+    } else if (correctedCPR < 0.20) {
+      sphericalEq = 2.00; // Moderate hyperopia
+    } else {
+      sphericalEq = 3.50 + (correctedCPR - 0.20) * 8; // High hyperopia
+    }
   } else {
     // Symmetric / Minimal crescent -> near emmetropia
-    sphericalEq = (validatedCrescentRatio - 0.05) * 1.5;
-    if (Math.abs(sphericalEq) < 0.3) sphericalEq = 0;
+    sphericalEq = (correctedCPR - 0.05) * 1.5;
+    if (Math.abs(sphericalEq) < 0.25) sphericalEq = 0;
   }
 
-  // Round to nearest 0.25 Diopters
+  // Clamp to clinical range (-10.0 to +8.0 D)
+  sphericalEq = Math.max(-10.0, Math.min(8.0, sphericalEq));
+
+  // Round to nearest 0.25 Diopters (clinical standard)
   sphericalEq = Math.round(sphericalEq * 4) / 4;
 
+  // AAPOS Risk Classification
   if (sphericalEq <= -6.0) {
     classification = 'HIGH_MYOPIA';
   } else if (sphericalEq <= -3.0) {
     classification = 'MODERATE_MYOPIA';
   } else if (sphericalEq <= -0.5) {
     classification = 'MILD_MYOPIA';
-  } else if (sphericalEq >= 0.75) {
+  } else if (sphericalEq >= 3.0) {
     classification = 'HYPEROPIA';
+  } else if (sphericalEq >= 0.75) {
+    classification = 'HYPEROPIA'; // Mild hyperopia
   } else {
     classification = 'EMMETROPIA';
   }
 
-  // AAPOS-defined Risk Category
+  // AAPOS-defined Risk Category (matches classification)
   const aaposRiskCategory = classification;
 
   // Dynamic Luminance Slope (dL/dx across pupil profile)
@@ -67,6 +112,7 @@ export function calculatePhotorefraction(
   // Dual-meridian Rotational Capture Astigmatism Analysis
   const rotationalAstigmatism = calculateRotationalAstigmatism(luminanceSlope * 0.12, luminanceSlope * 0.08);
 
+  // CRADLE Leukocoria Risk (AAPOS threshold for abnormal red reflex)
   const leukocoriaRisk = validatedReflexRatio > 0.88 || validatedReflexRatio < 0.35 ? 'CRADLE_POSITIVE' : 'NORMAL';
 
   return {
@@ -86,29 +132,250 @@ export function calculatePhotorefraction(
 }
 
 /**
- * Calculates BCEA (Bivariate Contour Ellipse Area) in deg^2 from fixational points with Kalman Pre-smoothing
+ * Calculates photorefraction for individual eye (OD or OS)
+ * Used for anisometropia detection
+ */
+export function calculateEyePhotorefraction(
+  eyeData: {
+    crescentRatio: number;
+    orientation: 'TOP' | 'BOTTOM' | 'SYMMETRIC';
+    pupilDiameterMm: number;
+    reflexRatio: number;
+  },
+  distanceCm: number = 45.0
+): EyeMetrics {
+  const result = calculatePhotorefraction(
+    eyeData.crescentRatio,
+    eyeData.orientation,
+    eyeData.pupilDiameterMm,
+    eyeData.reflexRatio,
+    distanceCm
+  );
+
+  return {
+    pupilDiameterMm: result.pupilDiameterMm,
+    redReflexIntensityRatio: result.redReflexIntensityRatio,
+    crescentHeightRatio: result.crescentHeightRatio,
+    crescentOrientation: result.crescentOrientation,
+    sphericalEquivalentDiopters: result.sphericalEquivalentDiopters,
+    astigmatismCylinderDiopters: result.astigmatismCylinderDiopters,
+    classification: result.classification,
+    confidenceScore: result.confidenceScore,
+    luminanceSlope: result.luminanceSlope,
+    rotationalAstigmatism: result.rotationalAstigmatism,
+  };
+}
+
+/**
+ * Calculates anisometropia (difference in refractive error between eyes)
+ * Based on AAPOS thresholds for amblyopia risk
+ */
+export function calculateAnisometropia(
+  odSE: number, // Right eye spherical equivalent
+  osSE: number  // Left eye spherical equivalent
+): { delta: number; risk: 'LOW' | 'MODERATE' | 'HIGH'; description: string } {
+  const delta = Math.abs(odSE - osSE);
+  
+  let risk: 'LOW' | 'MODERATE' | 'HIGH' = 'LOW';
+  let description = 'Minimal difference between eyes - low amblyopia risk';
+
+  // AAPOS thresholds for anisometropia amblyopia risk
+  if (delta >= 1.25) {
+    risk = 'HIGH';
+    description = 'Significant anisometropia (≥1.25D) - high amblyopia risk, clinical evaluation recommended';
+  } else if (delta >= 0.75) {
+    risk = 'MODERATE';
+    description = 'Moderate anisometropia (≥0.75D) - possible amblyopia risk, monitor closely';
+  }
+
+  return {
+    delta: Math.round(delta * 100) / 100,
+    risk,
+    description,
+  };
+}
+
+/**
+ * Savitzky-Golay Filter for Smoothing Time-Series Data
+ * Provides superior noise reduction while preserving signal features compared to moving averages
+ * @param data - Input data array
+ * @param windowSize - Size of the smoothing window (must be odd)
+ * @param polynomialOrder - Order of the fitting polynomial (typically 2 or 3)
+ * @returns Smoothed data array
+ */
+export function savitzkyGolayFilter(
+  data: number[],
+  windowSize: number = 7,
+  polynomialOrder: number = 2
+): number[] {
+  if (data.length < windowSize) return [...data];
+  if (windowSize % 2 === 0) windowSize++; // Ensure odd window size
+
+  const halfWindow = Math.floor(windowSize / 2);
+  const smoothed: number[] = [];
+
+  // Compute convolution coefficients using least squares
+  const coeffs = computeSavitzkyGolayCoefficients(windowSize, polynomialOrder);
+
+  for (let i = 0; i < data.length; i++) {
+    let sum = 0;
+    let weightSum = 0;
+
+    for (let j = -halfWindow; j <= halfWindow; j++) {
+      const idx = i + j;
+      if (idx >= 0 && idx < data.length) {
+        const weight = coeffs[j + halfWindow];
+        sum += data[idx] * weight;
+        weightSum += weight;
+      }
+    }
+
+    smoothed.push(weightSum > 0 ? sum / weightSum : data[i]);
+  }
+
+  return smoothed;
+}
+
+/**
+ * Computes Savitzky-Golay convolution coefficients
+ */
+function computeSavitzkyGolayCoefficients(
+  windowSize: number,
+  polynomialOrder: number
+): number[] {
+  const halfWindow = Math.floor(windowSize / 2);
+  const x: number[] = [];
+  for (let i = -halfWindow; i <= halfWindow; i++) x.push(i);
+
+  // Build Vandermonde matrix
+  const A: number[][] = [];
+  for (let i = 0; i < windowSize; i++) {
+    const row: number[] = [];
+    for (let j = 0; j <= polynomialOrder; j++) {
+      row.push(Math.pow(x[i], j));
+    }
+    A.push(row);
+  }
+
+  // Compute (A^T * A)^(-1) * A^T
+  const ATA = multiplyMatrix(transposeMatrix(A), A);
+  const invATA = invertMatrix(ATA);
+  const AT = transposeMatrix(A);
+  const coeffsMatrix = multiplyMatrix(invATA, AT);
+
+  // Return first row (for smoothing, order 0)
+  return coeffsMatrix[0];
+}
+
+/**
+ * Matrix transpose
+ */
+function transposeMatrix(matrix: number[][]): number[][] {
+  return matrix[0].map((_, colIndex) => matrix.map(row => row[colIndex]));
+}
+
+/**
+ * Matrix multiplication
+ */
+function multiplyMatrix(A: number[][], B: number[][]): number[][] {
+  const result: number[][] = [];
+  for (let i = 0; i < A.length; i++) {
+    result[i] = [];
+    for (let j = 0; j < B[0].length; j++) {
+      let sum = 0;
+      for (let k = 0; k < B.length; k++) {
+        sum += A[i][k] * B[k][j];
+      }
+      result[i][j] = sum;
+    }
+  }
+  return result;
+}
+
+/**
+ * Matrix inversion (Gaussian elimination for small matrices)
+ */
+function invertMatrix(matrix: number[][]): number[][] {
+  const n = matrix.length;
+  const augmented: number[][] = matrix.map((row, i) => {
+    const newRow = [...row];
+    for (let j = 0; j < n; j++) {
+      newRow.push(i === j ? 1 : 0);
+    }
+    return newRow;
+  });
+
+  for (let i = 0; i < n; i++) {
+    let maxRow = i;
+    for (let k = i + 1; k < n; k++) {
+      if (Math.abs(augmented[k][i]) > Math.abs(augmented[maxRow][i])) {
+        maxRow = k;
+      }
+    }
+    [augmented[i], augmented[maxRow]] = [augmented[maxRow], augmented[i]];
+
+    const pivot = augmented[i][i];
+    if (Math.abs(pivot) < 1e-10) continue;
+
+    for (let j = 0; j < 2 * n; j++) {
+      augmented[i][j] /= pivot;
+    }
+
+    for (let k = 0; k < n; k++) {
+      if (k !== i) {
+        const factor = augmented[k][i];
+        for (let j = 0; j < 2 * n; j++) {
+          augmented[k][j] -= factor * augmented[i][j];
+        }
+      }
+    }
+  }
+
+  return augmented.map(row => row.slice(n));
+}
+
+/**
+ * Calculates BCEA (Bivariate Contour Ellipse Area) in deg^2 from fixational points
+ * Enhanced with Savitzky-Golay smoothing for superior noise reduction
  * Formula: BCEA = 2 * pi * k * sigma_x * sigma_y * sqrt(1 - rho^2)
+ * @param points - Fixation points array
+ * @param confidenceLevel - Confidence level (0.6827 for 1-sigma, 0.9545 for 2-sigma)
+ * @param useSavitzkyGolay - Use Savitzky-Golay filter instead of Kalman (default: true)
  */
 export function calculateBCEA(
   points: FixationPoint[],
-  confidenceLevel: number = 0.95
-): { bceaDeg2: number; rawBceaDeg2: number; sigmaX: number; sigmaY: number; rho: number } {
+  confidenceLevel: number = 0.9545,
+  useSavitzkyGolay: boolean = true
+): { bceaDeg2: number; rawBceaDeg2: number; sigmaX: number; sigmaY: number; rho: number; confidenceLevel: number } {
   if (points.length < 5) {
-    return { bceaDeg2: 0.25, rawBceaDeg2: 0.32, sigmaX: 0.2, sigmaY: 0.2, rho: 0 };
+    return { bceaDeg2: 0.25, rawBceaDeg2: 0.32, sigmaX: 0.2, sigmaY: 0.2, rho: 0, confidenceLevel };
   }
 
   // Calculate raw unsmoothed BCEA
   const rawRes = computeBCEAFromPoints(points, confidenceLevel);
 
-  // Apply Kalman Filter Pre-Smoothing cycle to filter camera hand-jitter noise
-  const kalmanX = new KalmanFilter2D(0.04, 0.7);
-  const kalmanY = new KalmanFilter2D(0.04, 0.7);
+  let smoothedPoints: FixationPoint[];
 
-  const smoothedPoints: FixationPoint[] = points.map((p) => {
-    const smX = kalmanX.update(p.x * 100, 0).x / 100;
-    const smY = kalmanY.update(p.y * 100, 0).x / 100;
-    return { x: smX, y: smY };
-  });
+  if (useSavitzkyGolay) {
+    // Apply Savitzky-Golay filter for superior smoothing
+    const xData = points.map(p => p.x);
+    const yData = points.map(p => p.y);
+
+    const smoothedX = savitzkyGolayFilter(xData, 7, 2);
+    const smoothedY = savitzkyGolayFilter(yData, 7, 2);
+
+    smoothedPoints = smoothedX.map((x, i) => ({ x, y: smoothedY[i] }));
+  } else {
+    // Fallback to Kalman Filter Pre-Smoothing
+    const kalmanX = new KalmanFilter2D(0.04, 0.7);
+    const kalmanY = new KalmanFilter2D(0.04, 0.7);
+
+    smoothedPoints = points.map((p) => {
+      const smX = kalmanX.update(p.x * 100, 0).x / 100;
+      const smY = kalmanY.update(p.y * 100, 0).x / 100;
+      return { x: smX, y: smY };
+    });
+  }
 
   const smoothedRes = computeBCEAFromPoints(smoothedPoints, confidenceLevel);
 
@@ -118,6 +385,7 @@ export function calculateBCEA(
     sigmaX: smoothedRes.sigmaX,
     sigmaY: smoothedRes.sigmaY,
     rho: smoothedRes.rho,
+    confidenceLevel,
   };
 }
 
@@ -292,9 +560,16 @@ export function calculateMultiModalRisk(
   else if (finalRiskPercent >= 50) riskCategory = 'ELEVATED';
   else if (finalRiskPercent >= 30) riskCategory = 'MODERATE';
 
-  // 7. Progression Trajectory Forecast over 5 Years
+  // 7. Progression Trajectory Forecast over 5 Years with Age-Based Decay
   const currentD = photo.sphericalEquivalentDiopters;
-  const annualProgressionRate = (finalRiskPercent / 100) * 0.85; // Annual diopter shift (e.g. -0.65 D/yr)
+  const baseAnnualProgressionRate = (finalRiskPercent / 100) * 0.85; // Annual diopter shift (e.g. -0.65 D/yr)
+
+  // Calculate age-based decay factor for each year
+  // Progression naturally slows with age; decay factor = 1.0 for age <= 12, decreases by 0.1 per year after 12, min 0.5
+  const getAgeDecayFactor = (yearOffset: number): number => {
+    const ageAtYear = patient.age + yearOffset;
+    return Math.max(0.5, 1.0 - Math.max(0, (ageAtYear - 12)) * 0.1);
+  };
 
   const trajectory: TrajectoryPoint[] = [
     {
@@ -304,28 +579,29 @@ export function calculateMultiModalRisk(
       highRiskDiopters: currentD,
       lowRiskDiopters: currentD,
     },
-    {
-      year: 1,
-      label: 'Year 1',
-      estimatedDiopters: Math.round((currentD - annualProgressionRate) * 100) / 100,
-      highRiskDiopters: Math.round((currentD - annualProgressionRate * 1.4) * 100) / 100,
-      lowRiskDiopters: Math.round((currentD - annualProgressionRate * 0.4) * 100) / 100,
-    },
-    {
-      year: 3,
-      label: 'Year 3',
-      estimatedDiopters: Math.round((currentD - annualProgressionRate * 2.8) * 100) / 100,
-      highRiskDiopters: Math.round((currentD - annualProgressionRate * 3.8) * 100) / 100,
-      lowRiskDiopters: Math.round((currentD - annualProgressionRate * 1.2) * 100) / 100,
-    },
-    {
-      year: 5,
-      label: 'Year 5',
-      estimatedDiopters: Math.round((currentD - annualProgressionRate * 4.5) * 100) / 100,
-      highRiskDiopters: Math.round((currentD - annualProgressionRate * 5.8) * 100) / 100,
-      lowRiskDiopters: Math.round((currentD - annualProgressionRate * 2.0) * 100) / 100,
-    },
   ];
+
+  // Generate trajectory for years 1-5 with age-based decay
+  let currentEstimated = currentD;
+  let currentHighRisk = currentD;
+  let currentLowRisk = currentD;
+
+  for (let year = 1; year <= 5; year++) {
+    const ageFactor = getAgeDecayFactor(year);
+    const effectiveRate = baseAnnualProgressionRate * ageFactor;
+
+    currentEstimated = Math.round((currentEstimated - effectiveRate) * 100) / 100;
+    currentHighRisk = Math.round((currentHighRisk - effectiveRate * 1.4) * 100) / 100;
+    currentLowRisk = Math.round((currentLowRisk - effectiveRate * 0.4) * 100) / 100;
+
+    trajectory.push({
+      year,
+      label: `Year ${year}`,
+      estimatedDiopters: currentEstimated,
+      highRiskDiopters: currentHighRisk,
+      lowRiskDiopters: currentLowRisk,
+    });
+  }
 
   // 8. Integrate Best-in-Class Clinical Models (Li et al. 2024 & Foo et al. 2023 & CRADLE)
   const li2024MyopiaProgression12M = predictMyopiaProgressionLi2024(patient, photo);
@@ -587,8 +863,9 @@ export function predictMyopiaProgressionLi2024(
   const screenFactor = Math.max(0, patient.dailyScreenHours) / 8.0; // normalized
 
   // Li et al. (2024) regression formula
+  // Corrected: SE coefficient changed from -0.145 to +0.145 to reflect that higher myopia leads to faster progression
   let predictedChange12M =
-    -0.082 -
+    -0.082 +
     0.145 * baseSE -
     0.038 * isPediatric -
     0.120 * geneticLoad -

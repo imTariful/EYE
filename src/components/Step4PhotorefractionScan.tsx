@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { PhotorefractionData } from '../types';
-import { calculatePhotorefraction } from '../utils/opticsEngine';
+import { calculatePhotorefraction, calculateEyePhotorefraction, calculateAnisometropia } from '../utils/opticsEngine';
 import { EyeTrackerEngine, PupilFrameResult } from '../utils/eyeTracker';
+import { QualityPanel } from './QualityIndicator';
 import {
   Camera,
   Zap,
@@ -50,6 +51,15 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadedImage, setUploadedImage] = useState<string | null>(null);
+  const [uploadedVideo, setUploadedVideo] = useState<string | null>(null);
+  const [isProcessingUpload, setIsProcessingUpload] = useState(false);
+  const [uploadQualityScore, setUploadQualityScore] = useState<number | null>(null);
+  const [uploadQualityMessage, setUploadQualityMessage] = useState<string>('');
+
+  // Navigation Guard State
+  const [stableFrameCount, setStableFrameCount] = useState(0);
+  const [minFramesRequired] = useState(30);
+  const [canProceed, setCanProceed] = useState(false);
 
   // Live Pupil Tracker Metrics
   const [liveMetrics, setLiveMetrics] = useState<PupilFrameResult>({
@@ -146,6 +156,28 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
         setLiveMetrics(result);
         if (result.pupilDiameterMm) setPupilDiameter(result.pupilDiameterMm);
         if (result.crescentRatio) setCrescentRatio(result.crescentRatio);
+
+        // Navigation Guard: Count stable frames
+        const isStable = 
+          result.detected && 
+          !result.isBlinking && 
+          !result.isObscured && 
+          result.confidenceScore >= 70 &&
+          (result.blurVariance || 0) >= 50;
+
+        if (isStable) {
+          setStableFrameCount(prev => {
+            const newCount = prev + 1;
+            if (newCount >= minFramesRequired && !canProceed) {
+              setCanProceed(true);
+            }
+            return newCount;
+          });
+        } else {
+          // Reset count if unstable
+          setStableFrameCount(0);
+          setCanProceed(false);
+        }
       }
       animFrameRef.current = requestAnimationFrame(processLoop);
     };
@@ -178,8 +210,193 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
 
     setTimeout(() => {
       setIsCapturing(false);
-      onSave(currentPhotoData);
+      
+      // Calculate individual eye photorefraction
+      const odData = calculateEyePhotorefraction({
+        crescentRatio: liveMetrics.rightEye?.crescentRatio || crescentRatio,
+        orientation: liveMetrics.rightEye?.crescentOrientation || orientation,
+        pupilDiameterMm: liveMetrics.rightEye?.pupilDiameterMm || pupilDiameter,
+        reflexRatio: liveMetrics.rightEye?.redReflexIntensity || liveMetrics.redReflexIntensity || 0.88,
+      });
+
+      const osData = calculateEyePhotorefraction({
+        crescentRatio: liveMetrics.leftEye?.crescentRatio || crescentRatio,
+        orientation: liveMetrics.leftEye?.crescentOrientation || orientation,
+        pupilDiameterMm: liveMetrics.leftEye?.pupilDiameterMm || pupilDiameter,
+        reflexRatio: liveMetrics.leftEye?.redReflexIntensity || liveMetrics.redReflexIntensity || 0.88,
+      });
+
+      // Calculate anisometropia
+      const anisometropiaResult = calculateAnisometropia(
+        odData.sphericalEquivalentDiopters,
+        osData.sphericalEquivalentDiopters
+      );
+
+      // Update photorefraction data with individual eye metrics
+      const updatedPhotoData: PhotorefractionData = {
+        ...currentPhotoData,
+        od: odData,
+        os: osData,
+        anisometropiaDelta: anisometropiaResult.delta,
+        anisometropiaRisk: anisometropiaResult.risk,
+      };
+
+      onSave(updatedPhotoData);
     }, 1200);
+  };
+
+  // Blur detection using Laplacian variance
+  const checkImageQuality = (imgData: ImageData): { score: number; message: string; isAcceptable: boolean } => {
+    const data = imgData.data;
+    const width = imgData.width;
+    const values: number[] = [];
+
+    const startY = Math.max(1, 0);
+    const endY = Math.min(imgData.height - 1, imgData.height);
+    const startX = Math.max(1, 0);
+    const endX = Math.min(width - 1, width);
+
+    for (let y = startY; y < endY; y += 3) {
+      for (let x = startX; x < endX; x += 3) {
+        const getGray = (px: number, py: number) => {
+          const idx = (py * width + px) * 4;
+          return 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+        };
+
+        const center = getGray(x, y);
+        const top = getGray(x, y - 1);
+        const bottom = getGray(x, y + 1);
+        const left = getGray(x - 1, y);
+        const right = getGray(x + 1, y);
+
+        const laplacian = top + bottom + left + right - 4 * center;
+        values.push(laplacian);
+      }
+    }
+
+    if (values.length === 0) return { score: 0, message: 'Unable to analyze', isAcceptable: false };
+
+    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+    const varSum = values.reduce((acc, v) => acc + Math.pow(v - mean, 2), 0);
+    const variance = varSum / values.length;
+
+    // Quality thresholds based on Laplacian variance
+    if (variance >= 100) {
+      return { score: Math.round(variance), message: 'Excellent focus quality', isAcceptable: true };
+    } else if (variance >= 60) {
+      return { score: Math.round(variance), message: 'Good focus quality', isAcceptable: true };
+    } else if (variance >= 30) {
+      return { score: Math.round(variance), message: 'Acceptable focus quality', isAcceptable: true };
+    } else {
+      return { score: Math.round(variance), message: 'Image too blurry - please use a sharper photo', isAcceptable: false };
+    }
+  };
+
+  // Process uploaded image with quality check
+  const processUploadedImage = (imageSrc: string) => {
+    setIsProcessingUpload(true);
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        setIsProcessingUpload(false);
+        setUploadQualityMessage('Failed to process image');
+        return;
+      }
+
+      canvas.width = img.width;
+      canvas.height = img.height;
+      ctx.drawImage(img, 0, 0);
+
+      const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const quality = checkImageQuality(imgData);
+      
+      setUploadQualityScore(quality.score);
+      setUploadQualityMessage(quality.message);
+      
+      if (quality.isAcceptable) {
+        setUploadedImage(imageSrc);
+        // Process through eye tracker for analysis
+        if (videoRef.current) {
+          videoRef.current.srcObject = null;
+          videoRef.current.src = imageSrc;
+          videoRef.current.loop = true;
+          videoRef.current.play().then(() => {
+            setIsCameraActive(true);
+            setTimeout(() => {
+              handleFlashCapture();
+            }, 500);
+          }).catch(() => {
+            setIsProcessingUpload(false);
+          });
+        }
+      } else {
+        setIsProcessingUpload(false);
+      }
+    };
+    img.onerror = () => {
+      setIsProcessingUpload(false);
+      setUploadQualityMessage('Failed to load image');
+    };
+    img.src = imageSrc;
+  };
+
+  // Process uploaded video with frame sampling
+  const processUploadedVideo = (videoSrc: string) => {
+    setIsProcessingUpload(true);
+    setUploadedVideo(videoSrc);
+    
+    const video = document.createElement('video');
+    video.src = videoSrc;
+    video.muted = true;
+    video.playsInline = true;
+    
+    video.onloadedmetadata = () => {
+      video.currentTime = 0;
+      video.play();
+      
+      // Sample frames at 5 FPS for temporal aggregation
+      const frameInterval = 1000 / 5;
+      let frameCount = 0;
+      const maxFrames = 30;
+      
+      const processFrame = () => {
+        if (frameCount >= maxFrames || video.ended) {
+          video.pause();
+          setIsProcessingUpload(false);
+          handleFlashCapture();
+          return;
+        }
+        
+        // Process current frame through eye tracker
+        if (videoRef.current && overlayCanvasRef.current) {
+          videoRef.current.srcObject = null;
+          videoRef.current.src = videoSrc;
+          videoRef.current.currentTime = video.currentTime;
+          
+          const result = eyeTrackerRef.current.processFrame(
+            videoRef.current,
+            overlayCanvasRef.current,
+            { drawMesh: true, flashActive: false }
+          );
+          setLiveMetrics(result);
+          if (result.pupilDiameterMm) setPupilDiameter(result.pupilDiameterMm);
+          if (result.crescentRatio) setCrescentRatio(result.crescentRatio);
+        }
+        
+        frameCount++;
+        video.currentTime += frameInterval / 1000;
+        setTimeout(processFrame, frameInterval);
+      };
+      
+      processFrame();
+    };
+    
+    video.onerror = () => {
+      setIsProcessingUpload(false);
+      setUploadQualityMessage('Failed to load video');
+    };
   };
 
   // Upload image handler
@@ -187,12 +404,24 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
     const file = e.target.files?.[0];
     if (file) {
       stopCamera();
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        setUploadedImage(event.target?.result as string);
-        handleFlashCapture();
-      };
-      reader.readAsDataURL(file);
+      setUploadedImage(null);
+      setUploadedVideo(null);
+      
+      if (file.type.startsWith('image/')) {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          processUploadedImage(event.target?.result as string);
+        };
+        reader.readAsDataURL(file);
+      } else if (file.type.startsWith('video/')) {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          processUploadedVideo(event.target?.result as string);
+        };
+        reader.readAsDataURL(file);
+      } else {
+        setUploadQualityMessage('Unsupported file type. Please upload an image or video.');
+      }
     }
   };
 
@@ -244,6 +473,21 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
             </select>
           )}
 
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold px-4 py-1.5 rounded-xl transition-colors"
+          >
+            <Upload className="w-3.5 h-3.5" />
+            <span>Upload Photo/Video</span>
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*,video/*"
+            onChange={handleImageUpload}
+            className="hidden"
+          />
+
           {isCameraActive ? (
             <button
               onClick={stopCamera}
@@ -261,29 +505,46 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
               <span>Enable Live Camera</span>
             </button>
           )}
-
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center space-x-2 transition-colors border border-slate-700 cursor-pointer"
-          >
-            <Upload className="w-3.5 h-3.5 text-blue-400" />
-            <span>Upload Photo</span>
-          </button>
-          <input
-            type="file"
-            ref={fileInputRef}
-            accept="image/*"
-            onChange={handleImageUpload}
-            className="hidden"
-          />
         </div>
       </div>
+
+      {isProcessingUpload && (
+        <div className="bg-blue-50 border border-blue-200 p-4 rounded-2xl flex items-center space-x-3 text-blue-800 text-xs">
+          <RefreshCw className="w-5 h-5 shrink-0 text-blue-600 animate-spin" />
+          <span>Processing uploaded media...</span>
+        </div>
+      )}
+
+      {uploadQualityMessage && (
+        <div className={`p-4 rounded-2xl flex items-center space-x-3 text-xs ${
+          uploadQualityScore !== null && uploadQualityScore >= 30 
+            ? 'bg-emerald-50 border border-emerald-200 text-emerald-800' 
+            : 'bg-amber-50 border border-amber-200 text-amber-800'
+        }`}>
+          {uploadQualityScore !== null && uploadQualityScore >= 30 ? (
+            <CheckCircle2 className="w-5 h-5 shrink-0 text-emerald-600" />
+          ) : (
+            <AlertCircle className="w-5 h-5 shrink-0 text-amber-600" />
+          )}
+          <span>{uploadQualityMessage} {uploadQualityScore !== null && `(Score: ${uploadQualityScore})`}</span>
+        </div>
+      )}
 
       {cameraError && (
         <div className="bg-amber-50 border border-amber-200 p-4 rounded-2xl flex items-center space-x-3 text-amber-800 text-xs">
           <AlertCircle className="w-5 h-5 shrink-0 text-amber-600" />
           <span>{cameraError}</span>
         </div>
+      )}
+
+      {/* Quality Indicators Panel */}
+      {(isCameraActive || uploadedImage) && (
+        <QualityPanel
+          lighting={liveMetrics.redReflexIntensity}
+          fixation={0.82}
+          focus={liveMetrics.blurVariance || 80}
+          pupilTracking={liveMetrics.confidenceScore}
+        />
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -503,7 +764,12 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
                 onSave(currentPhotoData);
                 onNext();
               }}
-              className="inline-flex items-center space-x-2 px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs sm:text-sm shadow-md shadow-blue-500/20 transition-all cursor-pointer"
+              disabled={!canProceed && isCameraActive}
+              className={`inline-flex items-center space-x-2 px-6 py-2.5 rounded-xl font-bold text-xs sm:text-sm shadow-md transition-all cursor-pointer ${
+                canProceed || !isCameraActive
+                  ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-blue-500/20'
+                  : 'bg-slate-300 text-slate-500 cursor-not-allowed'
+              }`}
             >
               <span>Next: Multi-Modal Fusion Engine</span>
               <ArrowRight className="w-4 h-4" />

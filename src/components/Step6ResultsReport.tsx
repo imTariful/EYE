@@ -61,6 +61,9 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
 
+  // Interactive Eye Cards State
+  const [selectedEye, setSelectedEye] = useState<'combined' | 'od' | 'os'>('combined');
+
   // Send message to Express AI API
   const handleSendMessage = async (textToSend?: string) => {
     const query = textToSend || inputQuery;
@@ -179,30 +182,154 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
         </div>
       </div>
 
+      {/* Eye Selector Toggle */}
+      <div className="flex items-center justify-center space-x-2 mb-6">
+        <button
+          onClick={() => setSelectedEye('combined')}
+          className={`px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
+            selectedEye === 'combined'
+              ? 'bg-slate-900 text-white shadow-md'
+              : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+          }`}
+        >
+          Combined View
+        </button>
+        <button
+          onClick={() => setSelectedEye('od')}
+          className={`px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
+            selectedEye === 'od'
+              ? 'bg-blue-600 text-white shadow-md'
+              : 'bg-blue-50 text-blue-600 hover:bg-blue-100'
+          }`}
+        >
+          OD (Right)
+        </button>
+        <button
+          onClick={() => setSelectedEye('os')}
+          className={`px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
+            selectedEye === 'os'
+              ? 'bg-emerald-600 text-white shadow-md'
+              : 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100'
+          }`}
+        >
+          OS (Left)
+        </button>
+      </div>
+
       {/* Grid: Key Diagnostic Metric Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        {/* Card 1: Photorefraction Refraction & Dynamic Luminance Slope */}
-        <div className="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-xs space-y-3">
+        {/* Card 1: OD (Right Eye) Photorefraction */}
+        <div className={`bg-white p-6 rounded-3xl border shadow-xs space-y-3 transition-all ${
+          selectedEye === 'od' ? 'border-blue-500 ring-2 ring-blue-200' : 'border-slate-200/80'
+        } ${selectedEye === 'os' ? 'opacity-50' : ''}`}>
           <div className="flex items-center justify-between text-xs font-semibold text-slate-500">
-            <span>Refractive Error</span>
+            <span>OD (Right Eye)</span>
             <Eye className="w-4 h-4 text-blue-600" />
+          </div>
+          <div className="text-3xl font-extrabold text-slate-900 font-display">
+            {session.photorefraction.od?.sphericalEquivalentDiopters > 0 ? '+' : ''}
+            {session.photorefraction.od?.sphericalEquivalentDiopters.toFixed(2) || session.photorefraction.sphericalEquivalentDiopters.toFixed(2)} D
+          </div>
+          <div className="inline-block px-2.5 py-1 rounded-lg bg-blue-50 text-blue-700 font-bold text-xs border border-blue-200/60">
+            {session.photorefraction.od?.classification.replace('_', ' ') || session.photorefraction.classification.replace('_', ' ')}
+          </div>
+          <div className="text-[11px] text-slate-500 space-y-0.5">
+            <p>Pupil: <span className="font-semibold text-slate-700">{session.photorefraction.od?.pupilDiameterMm || session.photorefraction.pupilDiameterMm} mm</span></p>
+            <p>Reflex: <span className="font-semibold text-slate-700">{((session.photorefraction.od?.redReflexIntensityRatio || session.photorefraction.redReflexIntensityRatio) * 100).toFixed(0)}%</span></p>
+            {session.microsaccade.od && (
+              <p>BCEA: <span className="font-semibold text-slate-700">{session.microsaccade.od.bceaDeg2.toFixed(2)} deg²</span></p>
+            )}
+          </div>
+        </div>
+
+        {/* Card 2: OS (Left Eye) Photorefraction */}
+        <div className={`bg-white p-6 rounded-3xl border shadow-xs space-y-3 transition-all ${
+          selectedEye === 'os' ? 'border-emerald-500 ring-2 ring-emerald-200' : 'border-slate-200/80'
+        } ${selectedEye === 'od' ? 'opacity-50' : ''}`}>
+          <div className="flex items-center justify-between text-xs font-semibold text-slate-500">
+            <span>OS (Left Eye)</span>
+            <Eye className="w-4 h-4 text-emerald-600" />
+          </div>
+          <div className="text-3xl font-extrabold text-slate-900 font-display">
+            {session.photorefraction.os?.sphericalEquivalentDiopters > 0 ? '+' : ''}
+            {session.photorefraction.os?.sphericalEquivalentDiopters.toFixed(2) || session.photorefraction.sphericalEquivalentDiopters.toFixed(2)} D
+          </div>
+          <div className="inline-block px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 font-bold text-xs border border-emerald-200/60">
+            {session.photorefraction.os?.classification.replace('_', ' ') || session.photorefraction.classification.replace('_', ' ')}
+          </div>
+          <div className="text-[11px] text-slate-500 space-y-0.5">
+            <p>Pupil: <span className="font-semibold text-slate-700">{session.photorefraction.os?.pupilDiameterMm || session.photorefraction.pupilDiameterMm} mm</span></p>
+            <p>Reflex: <span className="font-semibold text-slate-700">{((session.photorefraction.os?.redReflexIntensityRatio || session.photorefraction.redReflexIntensityRatio) * 100).toFixed(0)}%</span></p>
+            {session.microsaccade.os && (
+              <p>BCEA: <span className="font-semibold text-slate-700">{session.microsaccade.os.bceaDeg2.toFixed(2)} deg²</span></p>
+            )}
+          </div>
+        </div>
+
+        {/* Card 3: Anisometropia Detection */}
+        <div className={`bg-white p-6 rounded-3xl border shadow-xs space-y-3 transition-all ${
+          (session.photorefraction.anisometropiaDelta >= 0.75 || session.photorefraction.anisometropiaRisk === 'MODERATE' || session.photorefraction.anisometropiaRisk === 'HIGH')
+            ? 'border-amber-400 ring-2 ring-amber-200'
+            : 'border-slate-200/80'
+        }`}>
+          <div className="flex items-center justify-between text-xs font-semibold text-slate-500">
+            <span>Anisometropia</span>
+            <Activity className="w-4 h-4 text-amber-600" />
+          </div>
+          <div className="text-3xl font-extrabold text-slate-900 font-display">
+            {session.photorefraction.anisometropiaDelta || 
+              Math.abs((session.photorefraction.od?.sphericalEquivalentDiopters || session.photorefraction.sphericalEquivalentDiopters) - 
+                       (session.photorefraction.os?.sphericalEquivalentDiopters || session.photorefraction.sphericalEquivalentDiopters)).toFixed(2)} D
+          </div>
+          <div className={`inline-block px-2.5 py-1 rounded-lg font-bold text-xs ${
+            session.photorefraction.anisometropiaRisk === 'HIGH' || session.photorefraction.anisometropiaDelta >= 1.25
+              ? 'bg-rose-100 text-rose-800 border border-rose-300'
+              : session.photorefraction.anisometropiaRisk === 'MODERATE' || session.photorefraction.anisometropiaDelta >= 0.75
+              ? 'bg-amber-100 text-amber-800 border border-amber-300'
+              : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+          }`}>
+            {session.photorefraction.anisometropiaRisk || 
+              (session.photorefraction.anisometropiaDelta >= 1.25 ? 'HIGH' : session.photorefraction.anisometropiaDelta >= 0.75 ? 'MODERATE' : 'LOW')} Risk
+          </div>
+          <p className="text-[11px] text-slate-500">
+            Difference between eyes
+          </p>
+          {(session.photorefraction.anisometropiaDelta >= 0.75 || session.photorefraction.anisometropiaRisk === 'MODERATE' || session.photorefraction.anisometropiaRisk === 'HIGH') && (
+            <div className="mt-2 p-2 bg-amber-50 rounded-lg border border-amber-200">
+              <p className="text-[10px] text-amber-800 font-semibold">
+                ⚠️ Asymmetry detected - Clinical follow-up recommended
+              </p>
+            </div>
+          )}
+        </div>
+
+        {/* Card 4: Combined Refractive Error */}
+        <div className={`bg-white p-6 rounded-3xl border shadow-xs space-y-3 transition-all ${
+          selectedEye === 'combined' ? 'border-purple-500 ring-2 ring-purple-200' : 'border-slate-200/80'
+        } ${selectedEye !== 'combined' ? 'opacity-50' : ''}`}>
+          <div className="flex items-center justify-between text-xs font-semibold text-slate-500">
+            <span>Combined SE</span>
+            <Target className="w-4 h-4 text-purple-600" />
           </div>
           <div className="text-3xl font-extrabold text-slate-900 font-display">
             {session.photorefraction.sphericalEquivalentDiopters > 0 ? '+' : ''}
             {session.photorefraction.sphericalEquivalentDiopters.toFixed(2)} D
           </div>
-          <div className="inline-block px-2.5 py-1 rounded-lg bg-blue-50 text-blue-700 font-bold text-xs border border-blue-200/60">
+          <div className="inline-block px-2.5 py-1 rounded-lg bg-purple-50 text-purple-700 font-bold text-xs border border-purple-200/60">
             {session.photorefraction.classification.replace('_', ' ')}
           </div>
           <div className="text-[11px] text-slate-500 space-y-0.5">
-            <p>Luminance Slope (dL/dx): <span className="font-semibold text-slate-700">{session.photorefraction.luminanceSlope || 2.4}</span></p>
+            <p>Luminance Slope: <span className="font-semibold text-slate-700">{session.photorefraction.luminanceSlope || 2.4}</span></p>
             {session.photorefraction.rotationalAstigmatism && (
               <p>Astigmatism: <span className="font-semibold text-slate-700">{session.photorefraction.rotationalAstigmatism.cylinderDiopters}D @ {session.photorefraction.rotationalAstigmatism.axisDegrees}°</span></p>
             )}
           </div>
         </div>
+      </div>
 
-        {/* Card 2: Li et al. (2024) 12-Month Progression Regression Model */}
+      {/* Secondary Row: Clinical Models */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        {/* Card: Li et al. (2024) 12-Month Progression Regression Model */}
         <div className="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-xs space-y-3">
           <div className="flex items-center justify-between text-xs font-semibold text-slate-500">
             <span>12-Mo Myopia Shift (Li 2024)</span>
@@ -220,7 +347,7 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
           </p>
         </div>
 
-        {/* Card 3: Foo et al. (2023) 5-Year High Myopia Deep Learning System */}
+        {/* Card: Foo et al. (2023) 5-Year High Myopia Deep Learning System */}
         <div className="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-xs space-y-3">
           <div className="flex items-center justify-between text-xs font-semibold text-slate-500">
             <span>5-Yr High Myopia Risk (Foo 2023)</span>
@@ -237,7 +364,7 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
           </p>
         </div>
 
-        {/* Card 4: CRADLE Leukocoria & Kalman BCEA */}
+        {/* Card: CRADLE Leukocoria & Kalman BCEA */}
         <div className="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-xs space-y-3">
           <div className="flex items-center justify-between text-xs font-semibold text-slate-500">
             <span>CRADLE Leukocoria & BCEA</span>
