@@ -17,6 +17,16 @@
  * a population average (real iris diameter varies ~10.2-13mm across individuals). Distance
  * estimates depend on an uncalibrated focal-length-in-pixels approximation. Treat outputs
  * as screening-grade estimates, not measurements.
+ *
+ * PERF NOTES (2026 pass):
+ *  - getImageData() is a synchronous GPU->CPU readback and the single biggest cost in
+ *    this pipeline. We now do at most 2 per frame in the MediaPipe tier (pupil-boundary
+ *    crop, reused for red-reflex/blur too; a throttled+downsampled ambient-light read),
+ *    down from 3 separate full/partial reads.
+ *  - Ambient light is now sampled from a small offscreen canvas via drawImage (cheap,
+ *    GPU-side downsample) rather than striding through a full-resolution ImageData
+ *    buffer, and is only refreshed every AMBIENT_LIGHT_THROTTLE_FRAMES frames since it
+ *    doesn't need per-frame precision.
  */
 
 import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
@@ -32,6 +42,14 @@ export const BLINK_BLENDSHAPE_THRESHOLD = 0.55;
 const IRIS_BIOLOGICAL_CONSTANT_MM = 11.7;
 const CHILD_IRIS_CONSTANT_MM = 11.0;
 const APPROX_FOCAL_LENGTH_PX = 600; // device-dependent; uncalibrated approximation
+
+// How often (in frames) to refresh the ambient-light estimate. Room brightness doesn't
+// change frame-to-frame, so there's no reason to pay a getImageData cost every frame.
+const AMBIENT_LIGHT_THROTTLE_FRAMES = 10;
+// Fixed small size for the ambient-light downsample canvas — big enough to average out
+// noise, tiny enough that reading it back is essentially free.
+const AMBIENT_LIGHT_SAMPLE_W = 48;
+const AMBIENT_LIGHT_SAMPLE_H = 27;
 
 export interface PupilFrameResult {
   detected: boolean;
@@ -291,9 +309,12 @@ export class EyeTrackerEngine {
   private frameCount: number = 0;
   private currentFps: number = 30;
 
-  // One Euro Filters for left/right iris-center smoothing (see class doc for rationale)
-  private leftSmoother = new OneEuroFilter2D(0.8, 0.4, 1.0);
-  private rightSmoother = new OneEuroFilter2D(0.8, 0.4, 1.0);
+  // One Euro Filters for left/right iris-center smoothing (see class doc for rationale).
+  // beta raised from 0.4 -> 0.7: the previous value under-relaxed smoothing during fast
+  // eye movement (saccades), which is what reads as "sluggish"/laggy tracking. This
+  // trades a small amount of extra jitter at rest for much less lag on quick motion.
+  private leftSmoother = new OneEuroFilter2D(0.8, 0.7, 1.0);
+  private rightSmoother = new OneEuroFilter2D(0.8, 0.7, 1.0);
 
   // CRADLE Leukocoria Multi-Frame Temporal Detector
   private cradleDetector = new CradleLeukocoriaDetector();
@@ -306,9 +327,20 @@ export class EyeTrackerEngine {
   private mediaPipeLoadProgress: number = 0;
   private mediaPipeLoadError: string | null = null;
 
+  // Small offscreen canvas + cache for throttled ambient-light sampling (see
+  // measureAmbientLight). Avoids a full-resolution getImageData() every frame.
+  private ambientCanvas: HTMLCanvasElement;
+  private ambientCtx: CanvasRenderingContext2D | null;
+  private ambientLightCache: number = 128;
+  private ambientLightFrameCounter: number = 0;
+
   constructor() {
     this.canvas = document.createElement('canvas');
     this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
+    this.ambientCanvas = document.createElement('canvas');
+    this.ambientCanvas.width = AMBIENT_LIGHT_SAMPLE_W;
+    this.ambientCanvas.height = AMBIENT_LIGHT_SAMPLE_H;
+    this.ambientCtx = this.ambientCanvas.getContext('2d', { willReadFrequently: true });
     this.initMediaPipe();
   }
 
@@ -380,6 +412,41 @@ export class EyeTrackerEngine {
   }
 
   /**
+   * Cheap, throttled ambient-light estimate. Instead of reading back a strided sample
+   * of the full-resolution frame (which still pays the cost of a full-res
+   * getImageData() call), we let the GPU do the downsampling via drawImage into a
+   * fixed tiny canvas, then read back only ~1,300 pixels. Refreshed once every
+   * AMBIENT_LIGHT_THROTTLE_FRAMES frames since room brightness doesn't change
+   * frame-to-frame.
+   */
+  private measureAmbientLight(width: number, height: number): number {
+    this.ambientLightFrameCounter++;
+    if (this.ambientLightFrameCounter % AMBIENT_LIGHT_THROTTLE_FRAMES !== 0) {
+      return this.ambientLightCache;
+    }
+    if (!this.ambientCtx) return this.ambientLightCache;
+
+    try {
+      this.ambientCtx.drawImage(
+        this.canvas,
+        0, 0, width, height,
+        0, 0, AMBIENT_LIGHT_SAMPLE_W, AMBIENT_LIGHT_SAMPLE_H
+      );
+      const small = this.ambientCtx.getImageData(0, 0, AMBIENT_LIGHT_SAMPLE_W, AMBIENT_LIGHT_SAMPLE_H);
+      const data = small.data;
+      let total = 0;
+      const pixelCount = AMBIENT_LIGHT_SAMPLE_W * AMBIENT_LIGHT_SAMPLE_H;
+      for (let i = 0; i < data.length; i += 4) {
+        total += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      }
+      this.ambientLightCache = pixelCount > 0 ? total / pixelCount : this.ambientLightCache;
+    } catch (e) {
+      // keep last cached value on failure (e.g. tainted canvas)
+    }
+    return this.ambientLightCache;
+  }
+
+  /**
    * Analyzes current frame from an HTMLVideoElement and draws tracking HUD onto targetCanvas
    */
   public processFrame(
@@ -424,11 +491,22 @@ export class EyeTrackerEngine {
     let zDistanceCm = 45.0;
     let zDistanceConfident = false;
     let estimatedPupilMm = 5.5;
+    // Explicit flag instead of comparing estimatedPupilMm to the 5.5 default via
+    // float equality — a legitimately-measured value landing near 5.5mm should never
+    // be silently overwritten by the cruder IPD-based fallback below.
+    let pupilMmMeasuredFromIris = false;
+    // Reused for red-reflex/blur measurement below so we don't pay for a second
+    // getImageData() crop when the iris-ruler pupil search already cropped this region.
+    let imgDataForPupil: ImageData | null = null;
 
     // TIER 1: MediaPipe Face Landmarker if ready
     if (this.mediaPipeReady && this.faceLandmarker) {
       try {
-        let videoTimestamp = Math.round(now);
+        // Derive the detection timestamp from the video's own clock rather than
+        // wall-clock performance.now(). Tying it to performance.now() can desync from
+        // the actual frame being analyzed whenever the render loop jitters, which
+        // shows up as jumpy/inconsistent tracking.
+        let videoTimestamp = Math.round(video.currentTime * 1000);
         if (videoTimestamp <= this.lastVideoTimestamp) {
           videoTimestamp = this.lastVideoTimestamp + 1;
         }
@@ -472,8 +550,9 @@ export class EyeTrackerEngine {
 
             // ACTUAL pupil boundary search, cropped tightly to each iris ring, instead
             // of assuming a constant radius. This is what makes pupilDiameterMm a real
-            // measurement rather than a rescaled copy of iris size.
-            let imgDataForPupil: ImageData | null = null;
+            // measurement rather than a rescaled copy of iris size. This same crop is
+            // reused below for red-reflex/blur measurement — one getImageData() call
+            // instead of two.
             try {
               const padding = Math.ceil(avgIrisDiameterPx * 0.7) || 20;
               const cropX = Math.max(0, Math.round(Math.min(leftIrisCenter.x, rightIrisCenter.x) * width - padding));
@@ -517,6 +596,7 @@ export class EyeTrackerEngine {
             const avgPupilRadiusPx = (leftRadiusPx + rightRadiusPx) / 2;
             const pupilMm = (avgPupilRadiusPx * 2) / Math.max(0.01, pixelsPerMm);
             estimatedPupilMm = Math.max(2.0, Math.min(8.0, pupilMm));
+            pupilMmMeasuredFromIris = true;
 
             // Distance: iris-pinhole model is the primary estimate (physically grounded,
             // if uncalibrated on focal length). MediaPipe's raw landmark z is normalized
@@ -556,48 +636,42 @@ export class EyeTrackerEngine {
       }
     }
 
-    // Measure red reflex intensity & Laplacian blur variance — cropped to the eye
-    // region rather than the full frame (perf: this used to run getImageData(0,0,W,H)
-    // up to three times per frame on the full image).
+    // Measure red reflex intensity & Laplacian blur variance. Prefer reusing the
+    // pupil-boundary crop from Tier 1 (imgDataForPupil) — it already covers both eyes
+    // with generous padding — instead of taking a second getImageData() crop. Only
+    // fall back to a fresh crop when Tier 1 didn't run (Tier 2 CV-only path).
     let redReflex = 0.72;
     let blurInfo = { variance: 120, isFocused: true };
-    const eyeRegion = computeEyeRegionBounds(leftPupil, rightPupil, width, height);
-    let regionImgData: ImageData | null = null;
-    try {
-      regionImgData = this.ctx.getImageData(eyeRegion.x, eyeRegion.y, eyeRegion.w, eyeRegion.h);
-    } catch (e) {}
 
-    if (regionImgData) {
-      const localLeft = leftPupil ? { x: leftPupil.x - eyeRegion.x, y: leftPupil.y - eyeRegion.y } : null;
-      const localRight = rightPupil ? { x: rightPupil.x - eyeRegion.x, y: rightPupil.y - eyeRegion.y } : null;
-      redReflex = this.computeRedChannelRatio(regionImgData, localLeft, localRight);
+    if (imgDataForPupil && leftPupil && rightPupil) {
+      const offX = (imgDataForPupil as any).__offsetX ?? 0;
+      const offY = (imgDataForPupil as any).__offsetY ?? 0;
+      const localLeft = { x: leftPupil.x - offX, y: leftPupil.y - offY };
+      const localRight = { x: rightPupil.x - offX, y: rightPupil.y - offY };
+      redReflex = this.computeRedChannelRatio(imgDataForPupil, localLeft, localRight);
       if (options.flashActive) redReflex = Math.min(1.0, redReflex * 1.25);
-      blurInfo = computeLaplacianBlurVariance(regionImgData, 0, regionImgData.width, 0, regionImgData.height);
+      blurInfo = computeLaplacianBlurVariance(imgDataForPupil, 0, imgDataForPupil.width, 0, imgDataForPupil.height);
+    } else {
+      const eyeRegion = computeEyeRegionBounds(leftPupil, rightPupil, width, height);
+      let regionImgData: ImageData | null = null;
+      try {
+        regionImgData = this.ctx.getImageData(eyeRegion.x, eyeRegion.y, eyeRegion.w, eyeRegion.h);
+      } catch (e) {}
+
+      if (regionImgData) {
+        const localLeft = leftPupil ? { x: leftPupil.x - eyeRegion.x, y: leftPupil.y - eyeRegion.y } : null;
+        const localRight = rightPupil ? { x: rightPupil.x - eyeRegion.x, y: rightPupil.y - eyeRegion.y } : null;
+        redReflex = this.computeRedChannelRatio(regionImgData, localLeft, localRight);
+        if (options.flashActive) redReflex = Math.min(1.0, redReflex * 1.25);
+        blurInfo = computeLaplacianBlurVariance(regionImgData, 0, regionImgData.width, 0, regionImgData.height);
+      }
     }
 
     // CRADLE Multi-Frame Temporal Aggregation for Leukocoria
     const cradleRes = this.cradleDetector.processFrame(redReflex, options.flashActive);
 
-    // Ambient light level detection (average frame brightness)
-    let ambientLightLevel = 128; // Default middle value
-    try {
-      const sampleStride = 20; // Sample every 20th pixel for performance
-      let totalBrightness = 0;
-      let sampleCount = 0;
-      const fullImgData = this.ctx.getImageData(0, 0, width, height);
-      const data = fullImgData.data;
-      for (let i = 0; i < data.length; i += 4 * sampleStride) {
-        const r = data[i];
-        const g = data[i + 1];
-        const b = data[i + 2];
-        const brightness = 0.299 * r + 0.587 * g + 0.114 * b;
-        totalBrightness += brightness;
-        sampleCount++;
-      }
-      ambientLightLevel = sampleCount > 0 ? totalBrightness / sampleCount : 128;
-    } catch (e) {
-      ambientLightLevel = 128;
-    }
+    // Ambient light level detection (throttled + downsampled — see measureAmbientLight)
+    const ambientLightLevel = this.measureAmbientLight(width, height);
 
     // Gaze angle calculation (deviation from camera center)
     let gazeAngleDeg = 0;
@@ -615,7 +689,7 @@ export class EyeTrackerEngine {
     }
 
     // IPD-based fallback only if the iris-ruler path above never ran (e.g. Tier 2 CV only)
-    if (estimatedPupilMm === 5.5 && leftPupil && rightPupil) {
+    if (!pupilMmMeasuredFromIris && leftPupil && rightPupil) {
       const ipdPx = Math.sqrt(Math.pow(leftPupil.x - rightPupil.x, 2) + Math.pow(leftPupil.y - rightPupil.y, 2));
       const averageIpdMm = 63.0;
       const pixelsPerMm = ipdPx / averageIpdMm;
@@ -1184,8 +1258,8 @@ function findPupilBoundary(
 
 /**
  * Bounding box covering both eyes with padding, clamped to frame bounds — used to
- * crop getImageData calls for red-reflex and blur measurement instead of reading
- * the entire frame.
+ * crop getImageData calls for red-reflex and blur measurement when the Tier 1
+ * pupil-boundary crop isn't available (Tier 2 CV-only path).
  */
 function computeEyeRegionBounds(
   left: { x: number; y: number; radius: number } | null,
