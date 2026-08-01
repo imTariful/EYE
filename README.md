@@ -11,6 +11,7 @@ OcuRisk transforms standard smartphone camera hardware into an AI-powered ophtha
 ## Features
 
 - **AI Photorefraction:** Analyzes pupil red reflex and crescent height patterns to estimate spherical equivalent refractive error
+- **Auto-Capture Mode:** Intelligent flash trigger that automatically captures when conditions are perfect (correct distance, dark room, proper gaze direction)
 - **Individual Eye Reporting:** Separate OD (Right Eye) and OS (Left Eye) metrics for comprehensive analysis
 - **Anisometropia Detection:** Automatic detection and risk assessment of refractive asymmetry between eyes
 - **Accommodative Testing:** Tracks Near Point of Convergence (NPC) and accommodative lag to detect eye strain
@@ -67,7 +68,7 @@ npm run build
 1. **Welcome Screen** - Introduction to the system
 2. **Patient Questionnaire** - Demographics, genetic factors, daily habits, visual acuity test
 3. **Accommodative Scan** - Camera-based NPC and accommodative lag measurement
-4. **Photorefraction Scan** - Red reflex analysis for refractive error estimation
+4. **Photorefraction Scan** - Red reflex analysis for refractive error estimation with intelligent auto-capture mode
 5. **Fusion Processing** - Bayesian multi-modal risk calculation
 6. **Results Report** - Comprehensive risk assessment with AI chat assistant
 
