@@ -537,10 +537,6 @@ export class EyeTrackerEngine {
             const rawRX = rightIrisCenter.x * width;
             const rawRY = rightIrisCenter.y * height;
 
-            // Adaptive One Euro smoothing (see OneEuroFilter2D doc)
-            const smoothL = this.leftSmoother.update(rawLX, rawLY, dt);
-            const smoothR = this.rightSmoother.update(rawRX, rawRY, dt);
-
             // Iris ring diameter in px (used both as the mm/px scale AND to bound
             // the pupil-boundary search region below)
             const leftIrisDiameterPx = irisRingDiameterPx(landmarks, 469, 471, 470, 472, width, height, leftIrisCenter);
@@ -577,6 +573,20 @@ export class EyeTrackerEngine {
 
             const leftRadiusPx = leftPupilBoundary?.radius ?? leftIrisDiameterPx * 0.42;
             const rightRadiusPx = rightPupilBoundary?.radius ?? rightIrisDiameterPx * 0.42;
+
+            // Smooth the MEASURED pupil centroid when the boundary search succeeded,
+            // falling back to the raw landmark position only when it didn't. Previously
+            // this always smoothed the landmark position and only ever used the
+            // boundary search for radius, so the tracked dot could sit visibly off the
+            // true pupil center (most noticeable during lateral gaze, where parallax
+            // shifts the pupil relative to the visible iris landmark).
+            const finalLX = leftPupilBoundary?.centerXFrame ?? rawLX;
+            const finalLY = leftPupilBoundary?.centerYFrame ?? rawLY;
+            const finalRX = rightPupilBoundary?.centerXFrame ?? rawRX;
+            const finalRY = rightPupilBoundary?.centerYFrame ?? rawRY;
+
+            const smoothL = this.leftSmoother.update(finalLX, finalLY, dt);
+            const smoothR = this.rightSmoother.update(finalRX, finalRY, dt);
 
             leftPupil = {
               x: smoothL.x,
@@ -1202,7 +1212,7 @@ function findPupilBoundary(
   centerXFrame: number,
   centerYFrame: number,
   irisRadiusPx: number
-): { radius: number; brightness: number } | null {
+): { radius: number; brightness: number; centerXFrame: number; centerYFrame: number } | null {
   const offsetX = (imgData as any).__offsetX ?? 0;
   const offsetY = (imgData as any).__offsetY ?? 0;
   const cx = Math.round(centerXFrame - offsetX);
@@ -1210,6 +1220,7 @@ function findPupilBoundary(
 
   // Search window: pupil is always <= iris, so bound the search to ~1.1x iris radius
   const searchRadius = Math.max(6, Math.round(irisRadiusPx * 1.1));
+  const searchRadiusSq = searchRadius * searchRadius;
   const xMin = Math.max(0, cx - searchRadius);
   const xMax = Math.min(imgData.width, cx + searchRadius);
   const yMin = Math.max(0, cy - searchRadius);
@@ -1222,8 +1233,15 @@ function findPupilBoundary(
   let totalPixels = 0;
   let minLum = 255;
 
+  // Mask to a CIRCLE matching the iris, not the surrounding square crop. A square
+  // window's corners can reach past the iris into eyebrow, eyelid-crease, or lash
+  // shadow — all dark and all outside the eye — which biases both the Otsu threshold
+  // and (worse) the centroid used as the reported pupil position.
   for (let y = yMin; y < yMax; y++) {
     for (let x = xMin; x < xMax; x++) {
+      const dx = x - cx;
+      const dy = y - cy;
+      if (dx * dx + dy * dy > searchRadiusSq) continue;
       const idx = (y * imgData.width + x) * 4;
       const lum = Math.round(0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2]);
       histogram[lum]++;
@@ -1240,11 +1258,20 @@ function findPupilBoundary(
   const darkThreshold = Math.min(minLum + 40, otsu);
 
   let count = 0;
+  let sumX = 0;
+  let sumY = 0;
   for (let y = yMin; y < yMax; y++) {
     for (let x = xMin; x < xMax; x++) {
+      const dx = x - cx;
+      const dy = y - cy;
+      if (dx * dx + dy * dy > searchRadiusSq) continue;
       const idx = (y * imgData.width + x) * 4;
       const lum = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
-      if (lum <= darkThreshold) count++;
+      if (lum <= darkThreshold) {
+        count++;
+        sumX += x;
+        sumY += y;
+      }
     }
   }
 
@@ -1253,7 +1280,23 @@ function findPupilBoundary(
   // Area -> radius assuming a roughly circular pupil disc
   const radius = Math.min(irisRadiusPx * 0.9, Math.max(irisRadiusPx * 0.15, Math.sqrt(count / Math.PI)));
 
-  return { radius, brightness: Math.round(minLum) };
+  // Re-center on the MEASURED dark-region centroid instead of just returning the
+  // radius and leaving the position as whatever the landmark said. The correction is
+  // clamped to a fraction of the iris radius so a stray dark patch (glare edge, a
+  // clump of lashes that slipped past the circular mask) can't drag the reported
+  // position far off the actual eye.
+  const measuredLocalX = sumX / count;
+  const measuredLocalY = sumY / count;
+  const maxShiftPx = irisRadiusPx * 0.35;
+  const shiftX = Math.max(-maxShiftPx, Math.min(maxShiftPx, measuredLocalX - cx));
+  const shiftY = Math.max(-maxShiftPx, Math.min(maxShiftPx, measuredLocalY - cy));
+
+  return {
+    radius,
+    brightness: Math.round(minLum),
+    centerXFrame: centerXFrame + shiftX,
+    centerYFrame: centerYFrame + shiftY,
+  };
 }
 
 /**
