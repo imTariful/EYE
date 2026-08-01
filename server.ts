@@ -105,7 +105,7 @@ Rules:
     ];
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash-exp',
+      model: 'gemini-2.0-flash-exp', // Preview model - fallback to 'gemini-2.0-flash' if unavailable
       contents,
       config: {
         systemInstruction,
@@ -133,8 +133,7 @@ Rules:
     res.status(500).json({
       error: 'Failed to generate AI response.',
       details: error.message || String(error),
-      fallbackReply:
-        'OcuRisk AI is currently operating in offline mode. Based on your scan metrics, please review your Refractive Error (-2.50D) and Accommodative Lag (+1.40D) cards in the dashboard. Always schedule an eye exam with an optometrist for clinical verification.',
+      fallbackReply: `OcuRisk AI is currently operating in offline mode. Based on your scan metrics, please review your Refractive Error (${req.body.session?.photorefraction?.sphericalEquivalentDiopters || -2.50}D) and Accommodative Lag (+${req.body.session?.accommodative?.accommodativeLagDiopters || 1.40}D) cards in the dashboard. Always schedule an eye exam with an optometrist for clinical verification.`,
     });
   }
 });
@@ -217,7 +216,7 @@ Please format the summary in 5 markdown sections:
 MANDATORY: You MUST include the text "Medical Disclaimer: OcuRisk is an AI screening tool, not a diagnostic device. Please consult a licensed eye care professional." at the bottom.`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash-exp',
+      model: 'gemini-2.0-flash-exp', // Preview model - fallback to 'gemini-2.0-flash' if unavailable
       contents: prompt,
       config: {
         systemInstruction: 'You are an expert ophthalmic AI clinical writer producing structured, high-clarity patient health reports.',
@@ -244,7 +243,7 @@ MANDATORY: You MUST include the text "Medical Disclaimer: OcuRisk is an AI scree
     res.status(500).json({
       error: 'Failed to generate report',
       reportMarkdown: `### Executive Summary & Plain Language Interpretation
-Based on the multi-modal photorefraction and accommodative scan, patient shows an estimated refractive error of **${req.body.session?.photorefraction?.sphericalEquivalentDiopters || '-2.50'} D** with a **${req.body.session?.riskResult?.overallRiskPercent || '75'}% 12-Month Progression Risk**.
+Based on the multi-modal photorefraction and accommodative scan, patient shows an estimated refractive error of **${req.body.session?.photorefraction?.sphericalEquivalentDiopters || -2.50} D** with a **${req.body.session?.riskResult?.overallRiskPercent || 75}% 12-Month Progression Risk**.
 
 ### Key Risk Drivers
 - High screen exposure relative to outdoor natural sunlight exposure.
@@ -278,7 +277,7 @@ app.post('/api/analyze-photo', (req, res) => {
     redReflexIntensityRatio: mockRedReflexRatio,
     crescentHeightRatio: mockCrescentRatio,
     crescentOrientation: mockOrientation,
-    sphericalEquivalentDiopters: -2.5,
+    sphericalEquivalentDiopters: -2.5, // Fallback - real analysis is client-side via processImage
     astigmatismCylinderDiopters: -0.5,
     classification: 'MODERATE_MYOPIA',
     confidenceScore: 92,

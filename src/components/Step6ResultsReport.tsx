@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { ScanSession, ChatMessage } from '../types';
 import {
   LineChart,
@@ -7,31 +7,34 @@ import {
   YAxis,
   Tooltip,
   ResponsiveContainer,
-  BarChart,
-  Bar,
-  Cell,
 } from 'recharts';
 import {
   Eye,
   Target,
   Sparkles,
   Send,
-  Download,
   Printer,
-  ShieldAlert,
   BrainCircuit,
   TrendingDown,
   Activity,
-  User,
   RotateCcw,
-  MessageSquare,
   Bot,
   FileText,
+  X,
 } from 'lucide-react';
 
 interface Step6ResultsReportProps {
   session: ScanSession;
   onResetScan: () => void;
+}
+
+const FALLBACK_CHAT_REPLY =
+  'Sorry, I could not reach the AI assistant just now. Please try again in a moment, or consult your optometrist directly with your scan results.';
+
+// Resolves a per-eye value with a sensible fallback to the combined reading,
+// so the four duplicated `x?.y || z` chains collapse into one place.
+function eyeValue<T>(eye: { [k: string]: T } | undefined, key: string, fallback: T): T {
+  return (eye && (eye as any)[key] !== undefined ? (eye as any)[key] : fallback) as T;
 }
 
 export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
@@ -43,10 +46,12 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
     {
       id: 'msg-1',
       sender: 'assistant',
-      text: `Hello ${session.patient.patientName}! I am OcuRisk AI, your personal Eye-Health Assistant. I've analyzed your multi-modal photorefraction, accommodative lag (+${session.accommodative.accommodativeLagDiopters.toFixed(2)}D), and fixational microsaccade scan. Your estimated 12-month myopia progression risk score is ${session.riskResult.overallRiskPercent}% (${session.riskResult.riskCategory} Risk). How can I help clarify your results today?`,
+      text: `Hello ${session.patient.patientName}! I am OcuRisk AI, your personal Eye-Health Assistant. I've analyzed your multi-modal photorefraction, accommodative lag (+${session.accommodative.accommodativeLagDiopters.toFixed(
+        2
+      )}D), and fixational microsaccade scan. Your estimated 12-month myopia progression risk score is ${session.riskResult.overallRiskPercent}% (${session.riskResult.riskCategory} Risk). How can I help clarify your results today?`,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       suggestedQuestions: [
-        'What does my -2.50D diopter rating mean?',
+        `What does my ${session.photorefraction.sphericalEquivalentDiopters}D diopter rating mean?`,
         'How can I slow my myopia progression?',
         'Explain Accommodative Lag and BCEA.',
         'What questions should I ask my optometrist?',
@@ -55,16 +60,36 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
   ]);
   const [inputQuery, setInputQuery] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   // AI Generated Report Summary State
   const [reportMarkdown, setReportMarkdown] = useState<string | null>(session.aiNotes || null);
+  const [reportError, setReportError] = useState<string | null>(null);
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
+  const modalRef = useRef<HTMLDivElement>(null);
 
   // Interactive Eye Cards State
   const [selectedEye, setSelectedEye] = useState<'combined' | 'od' | 'os'>('combined');
 
-  // Send message to Express AI API
+  // Auto-scroll chat to newest message
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [messages, isTyping]);
+
+  // Close modal on Escape, cancel in-flight chat request on unmount
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowReportModal(false);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      abortRef.current?.abort();
+    };
+  }, []);
+
   const handleSendMessage = async (textToSend?: string) => {
     const query = textToSend || inputQuery;
     if (!query.trim() || isTyping) return;
@@ -80,6 +105,9 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
     setInputQuery('');
     setIsTyping(true);
 
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
       const res = await fetch('/api/llm-agent/chat', {
         method: 'POST',
@@ -89,27 +117,33 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
           session,
           conversationHistory: messages.slice(-4),
         }),
+        signal: controller.signal,
       });
 
+      if (!res.ok) throw new Error(`Chat API returned ${res.status}`);
+
       const data = await res.json();
-      const aiReply = data.reply || data.fallbackReply;
+      const aiReply: string | undefined = data.reply || data.fallbackReply;
+      if (!aiReply) throw new Error('Empty reply from chat API');
 
-      const assistantMsg: ChatMessage = {
-        id: `ai-${Date.now()}`,
-        sender: 'assistant',
-        text: aiReply,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      };
-
-      setMessages((prev) => [...prev, assistantMsg]);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `ai-${Date.now()}`,
+          sender: 'assistant',
+          text: aiReply,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        },
+      ]);
     } catch (err) {
+      if ((err as any)?.name === 'AbortError') return;
       console.error('AI chat error:', err);
       setMessages((prev) => [
         ...prev,
         {
           id: `ai-err-${Date.now()}`,
           sender: 'assistant',
-          text: `Based on your scan, your Refractive Error is ${session.photorefraction.sphericalEquivalentDiopters}D and your Accommodative Lag is +${session.accommodative.accommodativeLagDiopters.toFixed(2)}D. Adopting the 20-20-20 rule and spending 2+ hours outdoors daily are strongly recommended. Please consult an optometrist for clinical care.`,
+          text: FALLBACK_CHAT_REPLY,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         },
       ]);
@@ -118,32 +152,45 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
     }
   };
 
-  // Generate Personalized AI Clinical Summary Report
   const handleGenerateReport = async () => {
     setIsGeneratingReport(true);
+    setReportError(null);
     try {
       const res = await fetch('/api/llm-agent/report', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session }),
       });
+      if (!res.ok) throw new Error(`Report API returned ${res.status}`);
       const data = await res.json();
+      if (!data.reportMarkdown) throw new Error('Report API returned no content');
       setReportMarkdown(data.reportMarkdown);
       setShowReportModal(true);
     } catch (err) {
       console.error('Report error:', err);
+      setReportError('We could not generate the AI health note. The key scan metrics below are still accurate — try again shortly.');
       setShowReportModal(true);
     } finally {
       setIsGeneratingReport(false);
     }
   };
 
-  const riskColor =
-    session.riskResult.riskCategory === 'HIGH'
-      ? 'rose'
-      : session.riskResult.riskCategory === 'ELEVATED'
-      ? 'amber'
-      : 'emerald';
+  // Per-eye display values, resolved once instead of four times per card.
+  const odValue = eyeValue(session.photorefraction.od, 'sphericalEquivalentDiopters', session.photorefraction.sphericalEquivalentDiopters);
+  const osValue = eyeValue(session.photorefraction.os, 'sphericalEquivalentDiopters', session.photorefraction.sphericalEquivalentDiopters);
+  const odClass = eyeValue(session.photorefraction.od, 'classification', session.photorefraction.classification);
+  const osClass = eyeValue(session.photorefraction.os, 'classification', session.photorefraction.classification);
+  const odPupil = eyeValue(session.photorefraction.od, 'pupilDiameterMm', session.photorefraction.pupilDiameterMm);
+  const osPupil = eyeValue(session.photorefraction.os, 'pupilDiameterMm', session.photorefraction.pupilDiameterMm);
+  const odReflex = eyeValue(session.photorefraction.od, 'redReflexIntensityRatio', session.photorefraction.redReflexIntensityRatio);
+  const osReflex = eyeValue(session.photorefraction.os, 'redReflexIntensityRatio', session.photorefraction.redReflexIntensityRatio);
+
+  const anisometropiaDelta =
+    session.photorefraction.anisometropiaDelta ?? Math.abs(odValue - osValue);
+  const anisometropiaRisk =
+    session.photorefraction.anisometropiaRisk ??
+    (anisometropiaDelta >= 2.0 ? 'HIGH' : anisometropiaDelta >= 0.75 ? 'MODERATE' : 'LOW');
+  const anisometropiaFlagged = anisometropiaRisk === 'MODERATE' || anisometropiaRisk === 'HIGH';
 
   return (
     <div className="space-y-8 animate-in fade-in duration-300 max-w-7xl mx-auto">
@@ -166,7 +213,7 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
           <button
             onClick={handleGenerateReport}
             disabled={isGeneratingReport}
-            className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center space-x-2 shadow-md shadow-blue-500/20 transition-all cursor-pointer"
+            className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-bold text-xs flex items-center space-x-2 shadow-md shadow-blue-500/20 transition-all cursor-pointer"
           >
             <FileText className="w-4 h-4" />
             <span>{isGeneratingReport ? 'Generating AI Note...' : 'Export AI Health Note'}</span>
@@ -183,10 +230,12 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
       </div>
 
       {/* Eye Selector Toggle */}
-      <div className="flex items-center justify-center space-x-2 mb-6">
+      <div className="flex items-center justify-center space-x-2 mb-6" role="tablist" aria-label="Select eye view">
         <button
+          role="tab"
+          aria-selected={selectedEye === 'combined'}
           onClick={() => setSelectedEye('combined')}
-          className={`px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
+          className={`px-4 py-2 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
             selectedEye === 'combined'
               ? 'bg-slate-900 text-white shadow-md'
               : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
@@ -195,8 +244,10 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
           Combined View
         </button>
         <button
+          role="tab"
+          aria-selected={selectedEye === 'od'}
           onClick={() => setSelectedEye('od')}
-          className={`px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
+          className={`px-4 py-2 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
             selectedEye === 'od'
               ? 'bg-blue-600 text-white shadow-md'
               : 'bg-blue-50 text-blue-600 hover:bg-blue-100'
@@ -205,8 +256,10 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
           OD (Right)
         </button>
         <button
+          role="tab"
+          aria-selected={selectedEye === 'os'}
           onClick={() => setSelectedEye('os')}
-          className={`px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
+          className={`px-4 py-2 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
             selectedEye === 'os'
               ? 'bg-emerald-600 text-white shadow-md'
               : 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100'
@@ -219,23 +272,25 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
       {/* Grid: Key Diagnostic Metric Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         {/* Card 1: OD (Right Eye) Photorefraction */}
-        <div className={`bg-white p-6 rounded-3xl border shadow-xs space-y-3 transition-all ${
-          selectedEye === 'od' ? 'border-blue-500 ring-2 ring-blue-200' : 'border-slate-200/80'
-        } ${selectedEye === 'os' ? 'opacity-50' : ''}`}>
+        <div
+          className={`bg-white p-6 rounded-3xl border shadow-xs space-y-3 transition-all ${
+            selectedEye === 'od' ? 'border-blue-500 ring-2 ring-blue-200' : 'border-slate-200/80'
+          } ${selectedEye === 'os' ? 'opacity-50' : ''}`}
+        >
           <div className="flex items-center justify-between text-xs font-semibold text-slate-500">
             <span>OD (Right Eye)</span>
             <Eye className="w-4 h-4 text-blue-600" />
           </div>
           <div className="text-3xl font-extrabold text-slate-900 font-display">
-            {session.photorefraction.od?.sphericalEquivalentDiopters > 0 ? '+' : ''}
-            {session.photorefraction.od?.sphericalEquivalentDiopters.toFixed(2) || session.photorefraction.sphericalEquivalentDiopters.toFixed(2)} D
+            {odValue > 0 ? '+' : ''}
+            {odValue.toFixed(2)} D
           </div>
           <div className="inline-block px-2.5 py-1 rounded-lg bg-blue-50 text-blue-700 font-bold text-xs border border-blue-200/60">
-            {session.photorefraction.od?.classification.replace('_', ' ') || session.photorefraction.classification.replace('_', ' ')}
+            {odClass.replace('_', ' ')}
           </div>
           <div className="text-[11px] text-slate-500 space-y-0.5">
-            <p>Pupil: <span className="font-semibold text-slate-700">{session.photorefraction.od?.pupilDiameterMm || session.photorefraction.pupilDiameterMm} mm</span></p>
-            <p>Reflex: <span className="font-semibold text-slate-700">{((session.photorefraction.od?.redReflexIntensityRatio || session.photorefraction.redReflexIntensityRatio) * 100).toFixed(0)}%</span></p>
+            <p>Pupil: <span className="font-semibold text-slate-700">{odPupil} mm</span></p>
+            <p>Reflex: <span className="font-semibold text-slate-700">{(odReflex * 100).toFixed(0)}%</span></p>
             {session.microsaccade.od && (
               <p>BCEA: <span className="font-semibold text-slate-700">{session.microsaccade.od.bceaDeg2.toFixed(2)} deg²</span></p>
             )}
@@ -243,23 +298,25 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
         </div>
 
         {/* Card 2: OS (Left Eye) Photorefraction */}
-        <div className={`bg-white p-6 rounded-3xl border shadow-xs space-y-3 transition-all ${
-          selectedEye === 'os' ? 'border-emerald-500 ring-2 ring-emerald-200' : 'border-slate-200/80'
-        } ${selectedEye === 'od' ? 'opacity-50' : ''}`}>
+        <div
+          className={`bg-white p-6 rounded-3xl border shadow-xs space-y-3 transition-all ${
+            selectedEye === 'os' ? 'border-emerald-500 ring-2 ring-emerald-200' : 'border-slate-200/80'
+          } ${selectedEye === 'od' ? 'opacity-50' : ''}`}
+        >
           <div className="flex items-center justify-between text-xs font-semibold text-slate-500">
             <span>OS (Left Eye)</span>
             <Eye className="w-4 h-4 text-emerald-600" />
           </div>
           <div className="text-3xl font-extrabold text-slate-900 font-display">
-            {session.photorefraction.os?.sphericalEquivalentDiopters > 0 ? '+' : ''}
-            {session.photorefraction.os?.sphericalEquivalentDiopters.toFixed(2) || session.photorefraction.sphericalEquivalentDiopters.toFixed(2)} D
+            {osValue > 0 ? '+' : ''}
+            {osValue.toFixed(2)} D
           </div>
           <div className="inline-block px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 font-bold text-xs border border-emerald-200/60">
-            {session.photorefraction.os?.classification.replace('_', ' ') || session.photorefraction.classification.replace('_', ' ')}
+            {osClass.replace('_', ' ')}
           </div>
           <div className="text-[11px] text-slate-500 space-y-0.5">
-            <p>Pupil: <span className="font-semibold text-slate-700">{session.photorefraction.os?.pupilDiameterMm || session.photorefraction.pupilDiameterMm} mm</span></p>
-            <p>Reflex: <span className="font-semibold text-slate-700">{((session.photorefraction.os?.redReflexIntensityRatio || session.photorefraction.redReflexIntensityRatio) * 100).toFixed(0)}%</span></p>
+            <p>Pupil: <span className="font-semibold text-slate-700">{osPupil} mm</span></p>
+            <p>Reflex: <span className="font-semibold text-slate-700">{(osReflex * 100).toFixed(0)}%</span></p>
             {session.microsaccade.os && (
               <p>BCEA: <span className="font-semibold text-slate-700">{session.microsaccade.os.bceaDeg2.toFixed(2)} deg²</span></p>
             )}
@@ -267,34 +324,31 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
         </div>
 
         {/* Card 3: Anisometropia Detection */}
-        <div className={`bg-white p-6 rounded-3xl border shadow-xs space-y-3 transition-all ${
-          (session.photorefraction.anisometropiaDelta >= 0.75 || session.photorefraction.anisometropiaRisk === 'MODERATE' || session.photorefraction.anisometropiaRisk === 'HIGH')
-            ? 'border-amber-400 ring-2 ring-amber-200'
-            : 'border-slate-200/80'
-        }`}>
+        <div
+          className={`bg-white p-6 rounded-3xl border shadow-xs space-y-3 transition-all ${
+            anisometropiaFlagged ? 'border-amber-400 ring-2 ring-amber-200' : 'border-slate-200/80'
+          }`}
+        >
           <div className="flex items-center justify-between text-xs font-semibold text-slate-500">
             <span>Anisometropia</span>
             <Activity className="w-4 h-4 text-amber-600" />
           </div>
           <div className="text-3xl font-extrabold text-slate-900 font-display">
-            {session.photorefraction.anisometropiaDelta || 
-              Math.abs((session.photorefraction.od?.sphericalEquivalentDiopters || session.photorefraction.sphericalEquivalentDiopters) - 
-                       (session.photorefraction.os?.sphericalEquivalentDiopters || session.photorefraction.sphericalEquivalentDiopters)).toFixed(2)} D
+            {anisometropiaDelta.toFixed(2)} D
           </div>
-          <div className={`inline-block px-2.5 py-1 rounded-lg font-bold text-xs ${
-            session.photorefraction.anisometropiaRisk === 'HIGH' || session.photorefraction.anisometropiaDelta >= 1.25
-              ? 'bg-rose-100 text-rose-800 border border-rose-300'
-              : session.photorefraction.anisometropiaRisk === 'MODERATE' || session.photorefraction.anisometropiaDelta >= 0.75
-              ? 'bg-amber-100 text-amber-800 border border-amber-300'
-              : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-          }`}>
-            {session.photorefraction.anisometropiaRisk || 
-              (session.photorefraction.anisometropiaDelta >= 1.25 ? 'HIGH' : session.photorefraction.anisometropiaDelta >= 0.75 ? 'MODERATE' : 'LOW')} Risk
+          <div
+            className={`inline-block px-2.5 py-1 rounded-lg font-bold text-xs border ${
+              anisometropiaRisk === 'HIGH'
+                ? 'bg-rose-100 text-rose-800 border-rose-300'
+                : anisometropiaRisk === 'MODERATE'
+                ? 'bg-amber-100 text-amber-800 border-amber-300'
+                : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+            }`}
+          >
+            {anisometropiaRisk} Risk
           </div>
-          <p className="text-[11px] text-slate-500">
-            Difference between eyes
-          </p>
-          {(session.photorefraction.anisometropiaDelta >= 0.75 || session.photorefraction.anisometropiaRisk === 'MODERATE' || session.photorefraction.anisometropiaRisk === 'HIGH') && (
+          <p className="text-[11px] text-slate-500">Difference between eyes</p>
+          {anisometropiaFlagged && (
             <div className="mt-2 p-2 bg-amber-50 rounded-lg border border-amber-200">
               <p className="text-[10px] text-amber-800 font-semibold">
                 ⚠️ Asymmetry detected - Clinical follow-up recommended
@@ -304,9 +358,11 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
         </div>
 
         {/* Card 4: Combined Refractive Error */}
-        <div className={`bg-white p-6 rounded-3xl border shadow-xs space-y-3 transition-all ${
-          selectedEye === 'combined' ? 'border-purple-500 ring-2 ring-purple-200' : 'border-slate-200/80'
-        } ${selectedEye !== 'combined' ? 'opacity-50' : ''}`}>
+        <div
+          className={`bg-white p-6 rounded-3xl border shadow-xs space-y-3 transition-all ${
+            selectedEye === 'combined' ? 'border-purple-500 ring-2 ring-purple-200' : 'border-slate-200/80'
+          } ${selectedEye !== 'combined' ? 'opacity-50' : ''}`}
+        >
           <div className="flex items-center justify-between text-xs font-semibold text-slate-500">
             <span>Combined SE</span>
             <Target className="w-4 h-4 text-purple-600" />
@@ -319,7 +375,7 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
             {session.photorefraction.classification.replace('_', ' ')}
           </div>
           <div className="text-[11px] text-slate-500 space-y-0.5">
-            <p>Luminance Slope: <span className="font-semibold text-slate-700">{session.photorefraction.luminanceSlope || 2.4}</span></p>
+            <p>Luminance Slope: <span className="font-semibold text-slate-700">{session.photorefraction.luminanceSlope ?? 2.4}</span></p>
             {session.photorefraction.rotationalAstigmatism && (
               <p>Astigmatism: <span className="font-semibold text-slate-700">{session.photorefraction.rotationalAstigmatism.cylinderDiopters}D @ {session.photorefraction.rotationalAstigmatism.axisDegrees}°</span></p>
             )}
@@ -329,14 +385,13 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
 
       {/* Secondary Row: Clinical Models */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {/* Card: Li et al. (2024) 12-Month Progression Regression Model */}
         <div className="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-xs space-y-3">
           <div className="flex items-center justify-between text-xs font-semibold text-slate-500">
             <span>12-Mo Myopia Shift (Li 2024)</span>
             <BrainCircuit className="w-4 h-4 text-purple-600" />
           </div>
           <div className="text-3xl font-extrabold text-purple-700 font-display flex items-baseline space-x-1.5">
-            <span>{session.riskResult.li2024MyopiaProgression12M?.predictedChange12M || -0.48} D</span>
+            <span>{session.riskResult.li2024MyopiaProgression12M?.predictedChange12M ?? -0.48} D</span>
             <span className="text-xs font-normal text-slate-500">/yr</span>
           </div>
           <div className="inline-block px-2.5 py-1 rounded-lg bg-purple-50 text-purple-800 font-bold text-xs border border-purple-200/60">
@@ -347,24 +402,22 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
           </p>
         </div>
 
-        {/* Card: Foo et al. (2023) 5-Year High Myopia Deep Learning System */}
         <div className="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-xs space-y-3">
           <div className="flex items-center justify-between text-xs font-semibold text-slate-500">
             <span>5-Yr High Myopia Risk (Foo 2023)</span>
             <Target className="w-4 h-4 text-indigo-600" />
           </div>
           <div className="text-3xl font-extrabold text-slate-900 font-display">
-            {session.riskResult.foo2023FiveYearHighMyopiaRisk?.riskPercent5Y || 35}%
+            {session.riskResult.foo2023FiveYearHighMyopiaRisk?.riskPercent5Y ?? 35}%
           </div>
           <div className="inline-block px-2.5 py-1 rounded-lg bg-indigo-50 text-indigo-700 font-bold text-xs border border-indigo-200/60">
             Foo et al. DLS (AUC 0.97)
           </div>
           <p className="text-[11px] text-slate-500">
-            5-Year Category: <span className="font-bold text-slate-800">{session.riskResult.foo2023FiveYearHighMyopiaRisk?.riskCategory5Y || 'MODERATE'}</span>
+            5-Year Category: <span className="font-bold text-slate-800">{session.riskResult.foo2023FiveYearHighMyopiaRisk?.riskCategory5Y ?? 'MODERATE'}</span>
           </p>
         </div>
 
-        {/* Card: CRADLE Leukocoria & Kalman BCEA */}
         <div className="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-xs space-y-3">
           <div className="flex items-center justify-between text-xs font-semibold text-slate-500">
             <span>CRADLE Leukocoria & BCEA</span>
@@ -373,15 +426,17 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
           <div className="text-3xl font-extrabold text-slate-900 font-display">
             {session.microsaccade.bceaDeg2} <span className="text-sm font-normal text-slate-500">deg²</span>
           </div>
-          <div className={`inline-block px-2.5 py-1 rounded-lg font-bold text-xs ${
-            session.riskResult.cradleLeukocoria?.isPositive
-              ? 'bg-rose-100 text-rose-800 border border-rose-300'
-              : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-          }`}>
+          <div
+            className={`inline-block px-2.5 py-1 rounded-lg font-bold text-xs border ${
+              session.riskResult.cradleLeukocoria?.isPositive
+                ? 'bg-rose-100 text-rose-800 border-rose-300'
+                : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+            }`}
+          >
             CRADLE: {session.riskResult.cradleLeukocoria?.isPositive ? 'LEUKOCORIA SUSPECT' : 'NORMAL REFLEX'}
           </div>
           <p className="text-[11px] text-slate-500">
-            Kalman Smoothed Fixation (Raw: {session.microsaccade.rawBceaDeg2 || session.microsaccade.bceaDeg2} deg²)
+            Kalman Smoothed Fixation (Raw: {session.microsaccade.rawBceaDeg2 ?? session.microsaccade.bceaDeg2} deg²)
           </p>
         </div>
       </div>
@@ -390,7 +445,6 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Left Column: Trajectory Forecast & Feature Contributions */}
         <div className="lg:col-span-7 space-y-6">
-          {/* 5-Year Myopia Progression Trajectory Chart */}
           <div className="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-xs space-y-4">
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div>
@@ -409,7 +463,7 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
                   <YAxis stroke="#64748b" fontSize={11} unit="D" domain={['dataMin - 1', 'dataMax + 0.5']} />
                   <Tooltip
                     contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '12px', color: '#fff', fontSize: '11px' }}
-                    formatter={(val: any) => [`${val} D`]}
+                    formatter={(val: number) => [`${val} D`]}
                   />
                   <Line type="monotone" dataKey="estimatedDiopters" stroke="#2563eb" strokeWidth={3} name="Estimated Path" />
                   <Line type="monotone" dataKey="highRiskDiopters" stroke="#e11d48" strokeWidth={2} strokeDasharray="4 4" name="Unmanaged Path" />
@@ -434,29 +488,33 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
             </div>
           </div>
 
-          {/* Shapley / Feature Contribution Waterfall */}
+          {/* Feature Contribution list */}
           <div className="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-xs space-y-4">
             <h3 className="font-bold text-slate-900 text-base font-display">
               Multi-Modal Risk Factor Weightings
             </h3>
 
             <div className="space-y-3">
-              {session.riskResult.featureContributions.map((fc, i) => (
-                <div key={i} className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-1">
-                  <div className="flex justify-between items-center text-xs">
-                    <span className="font-bold text-slate-800">{fc.feature}</span>
-                    <span className="font-mono font-bold text-blue-600">+{fc.impactScore.toFixed(1)} Impact</span>
+              {session.riskResult.featureContributions.map((fc) => {
+                const positive = fc.impactScore >= 0;
+                return (
+                  <div key={fc.feature} className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-1">
+                    <div className="flex justify-between items-center text-xs">
+                      <span className="font-bold text-slate-800">{fc.feature}</span>
+                      <span className={`font-mono font-bold ${positive ? 'text-blue-600' : 'text-green-600'}`}>
+                        {positive ? `+${fc.impactScore.toFixed(1)}` : fc.impactScore.toFixed(1)} Impact
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-600">{fc.description}</p>
                   </div>
-                  <p className="text-[11px] text-slate-600">{fc.description}</p>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </div>
 
         {/* Right Column: Conversational LLM Eye-Health Agent */}
         <div className="lg:col-span-5 bg-slate-900 text-white rounded-3xl border border-slate-800 shadow-xl p-6 flex flex-col justify-between h-[650px]">
-          {/* Chat Header */}
           <div className="flex items-center space-x-3 pb-4 border-b border-slate-800 shrink-0">
             <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-cyan-500 to-blue-600 flex items-center justify-center text-white shadow-md shadow-blue-500/30">
               <Bot className="w-6 h-6" />
@@ -473,12 +531,14 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
           </div>
 
           {/* Message List */}
-          <div className="flex-1 overflow-y-auto my-4 space-y-4 pr-1 text-xs no-scrollbar">
+          <div
+            className="flex-1 overflow-y-auto my-4 space-y-4 pr-1 text-xs no-scrollbar"
+            role="log"
+            aria-live="polite"
+            aria-label="Conversation with OcuRisk AI"
+          >
             {messages.map((msg) => (
-              <div
-                key={msg.id}
-                className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}
-              >
+              <div key={msg.id} className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}>
                 <div
                   className={`max-w-[88%] p-3.5 rounded-2xl leading-relaxed ${
                     msg.sender === 'user'
@@ -488,14 +548,14 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
                 >
                   <p className="whitespace-pre-line">{msg.text}</p>
 
-                  {/* Suggested Question Pills */}
                   {msg.suggestedQuestions && (
                     <div className="pt-2 flex flex-wrap gap-1.5 border-t border-slate-700/60 mt-2">
-                      {msg.suggestedQuestions.map((q, idx) => (
+                      {msg.suggestedQuestions.map((q) => (
                         <button
-                          key={idx}
+                          key={q}
                           onClick={() => handleSendMessage(q)}
-                          className="text-[10px] bg-slate-700/80 hover:bg-blue-600 text-cyan-200 hover:text-white px-2.5 py-1 rounded-lg transition-colors border border-slate-600/60 text-left"
+                          disabled={isTyping}
+                          className="text-[10px] bg-slate-700/80 hover:bg-blue-600 disabled:opacity-50 text-cyan-200 hover:text-white px-2.5 py-1 rounded-lg transition-colors border border-slate-600/60 text-left cursor-pointer"
                         >
                           {q}
                         </button>
@@ -513,9 +573,9 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
                 <span className="text-xs font-mono">AI is analyzing optics data...</span>
               </div>
             )}
+            <div ref={messagesEndRef} />
           </div>
 
-          {/* Input Box */}
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -528,11 +588,15 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
               value={inputQuery}
               onChange={(e) => setInputQuery(e.target.value)}
               placeholder="Ask about your scan results..."
-              className="flex-1 bg-slate-950 border border-slate-700 text-white rounded-xl px-3.5 py-2.5 text-xs focus:outline-hidden focus:border-blue-500 transition-colors"
+              disabled={isTyping}
+              maxLength={500}
+              aria-label="Ask the OcuRisk AI assistant a question"
+              className="flex-1 bg-slate-950 border border-slate-700 text-white rounded-xl px-3.5 py-2.5 text-xs focus:outline-hidden focus:border-blue-500 transition-colors disabled:opacity-60"
             />
             <button
               type="submit"
               disabled={!inputQuery.trim() || isTyping}
+              aria-label="Send message"
               className="p-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 text-white rounded-xl transition-all cursor-pointer"
             >
               <Send className="w-4 h-4" />
@@ -543,11 +607,22 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
 
       {/* AI Health Note Export Modal */}
       {showReportModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white text-slate-900 rounded-3xl max-w-2xl w-full p-6 sm:p-8 space-y-6 shadow-2xl max-h-[90vh] overflow-y-auto animate-in fade-in duration-200">
+        <div
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setShowReportModal(false);
+          }}
+        >
+          <div
+            ref={modalRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ai-report-title"
+            className="bg-white text-slate-900 rounded-3xl max-w-2xl w-full p-6 sm:p-8 space-y-6 shadow-2xl max-h-[90vh] overflow-y-auto animate-in fade-in duration-200"
+          >
             <div className="flex justify-between items-center border-b border-slate-100 pb-4">
               <div>
-                <h3 className="text-xl font-bold font-display text-slate-900">
+                <h3 id="ai-report-title" className="text-xl font-bold font-display text-slate-900">
                   OcuRisk AI Eye-Health Summary Report
                 </h3>
                 <p className="text-xs text-slate-500">
@@ -556,9 +631,10 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
               </div>
               <button
                 onClick={() => setShowReportModal(false)}
+                aria-label="Close report"
                 className="text-slate-400 hover:text-slate-600 font-bold p-1 text-sm cursor-pointer"
               >
-                ✕
+                <X className="w-4 h-4" />
               </button>
             </div>
 
@@ -570,15 +646,22 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
                 <div>Microsaccade BCEA: {session.microsaccade.bceaDeg2} deg²</div>
               </div>
 
-              <div className="whitespace-pre-line leading-relaxed text-slate-700 font-normal">
-                {reportMarkdown}
-              </div>
+              {reportError ? (
+                <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-2xl p-4 text-[11px] font-medium">
+                  {reportError}
+                </div>
+              ) : (
+                <div className="whitespace-pre-line leading-relaxed text-slate-700 font-normal">
+                  {reportMarkdown}
+                </div>
+              )}
             </div>
 
             <div className="flex justify-end space-x-3 pt-4 border-t border-slate-100">
               <button
                 onClick={() => window.print()}
-                className="px-4 py-2 rounded-xl bg-slate-900 text-white font-bold text-xs flex items-center space-x-2 hover:bg-slate-800 transition-colors cursor-pointer"
+                disabled={!reportMarkdown}
+                className="px-4 py-2 rounded-xl bg-slate-900 text-white font-bold text-xs flex items-center space-x-2 hover:bg-slate-800 disabled:opacity-50 transition-colors cursor-pointer"
               >
                 <Printer className="w-4 h-4" />
                 <span>Print Report</span>

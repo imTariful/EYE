@@ -14,73 +14,80 @@ import {
 } from '../types';
 import { KalmanFilter2D } from './eyeTracker';
 
+// ---------------------------------------------------------------------------
+// Shared types & clinical constants
+// ---------------------------------------------------------------------------
+
+export type CrescentOrientation = 'TOP' | 'BOTTOM' | 'SYMMETRIC';
+
+/** AAPOS classification thresholds for spherical equivalent (Diopters) */
+const AAPOS_THRESHOLDS = {
+  HIGH_MYOPIA: -6.0,
+  MODERATE_MYOPIA: -3.0,
+  MILD_MYOPIA: -0.5,
+  HYPEROPIA: 3.0,
+  MILD_HYPEROPIA: 0.75,
+} as const;
+
+/** CRADLE red-reflex thresholds indicating possible leukocoria */
+const LEUKOCORIA_REFLEX_BOUNDS = { UPPER: 0.88, LOWER: 0.35 } as const;
+
+/** Anisometropia / amblyopia risk thresholds (Diopters) */
+const ANISOMETROPIA_THRESHOLDS = { HIGH: 2.0, MODERATE: 0.75 } as const;
+const ARF_THRESHOLDS = { HIGH: 1.25, MODERATE: 0.75 } as const;
+
+/** Li et al. 2024 12-month progression regression coefficients */
+const LI2024_COEFFICIENTS = {
+  intercept: -0.082,
+  se: 0.145, // higher (more negative) baseline SE -> faster progression
+  pediatric: -0.038,
+  geneticLoad: -0.12,
+  screenFactor: -0.045,
+  outdoorFactor: 0.052,
+} as const;
+
+// ---------------------------------------------------------------------------
+// Photorefraction
+// ---------------------------------------------------------------------------
+
 /**
  * Calculates Photorefraction estimates based on Crescent-to-Pupil Ratio (CPR)
  * Integrates AAPOS (American Association for Pediatric Ophthalmology and Strabismus) clinical thresholds
+ * Uses Howland eccentric photorefraction formula (Bobier & Braddick)
  * CPR = CrescentWidth / PupilDiameter
  * @param crescentRatio - Crescent height relative to pupil radius (0 to 0.8)
  * @param orientation - Crescent orientation (TOP=Myopia, BOTTOM=Hyperopia, SYMMETRIC=Emmetropia)
  * @param pupilDiameterMm - Pupil diameter in millimeters (2.0 to 8.0)
  * @param reflexRatio - Red reflex intensity ratio (0 to 1)
- * @param distanceCm - Distance from camera in cm (for CPR calibration)
+ * @param workingDistanceCm - Working distance from camera in cm (default 100cm)
+ * @param flashEccentricityMm - Flash eccentricity in mm (default 12mm)
+ * @param opticalConstantK - Optical constant K (default 6.0)
  */
 export function calculatePhotorefraction(
   crescentRatio: number,
-  orientation: 'TOP' | 'BOTTOM' | 'SYMMETRIC',
+  orientation: CrescentOrientation,
   pupilDiameterMm: number = 5.5,
   reflexRatio: number = 0.85,
-  distanceCm: number = 45.0
+  workingDistanceCm: number = 100,
+  flashEccentricityMm: number = 12,
+  opticalConstantK: number = 6.0,
 ): PhotorefractionData {
   // Input validation
   const validatedCrescentRatio = Math.max(0, Math.min(0.8, crescentRatio));
   const validatedPupilDiameterMm = Math.max(2.0, Math.min(8.0, pupilDiameterMm));
   const validatedReflexRatio = Math.max(0, Math.min(1.0, reflexRatio));
-  const validatedDistanceCm = Math.max(20, Math.min(100, distanceCm));
+  const validatedWorkingDistanceCm = Math.max(20, Math.min(150, workingDistanceCm));
+  const validatedFlashEccentricityMm = Math.max(1, Math.min(25, flashEccentricityMm));
+  const validatedOpticalConstantK = Math.max(1, Math.min(15, opticalConstantK));
 
-  // Calculate Crescent-to-Pupil Ratio (CPR)
-  // CPR = (crescentRatio * pupilRadius) / pupilDiameter = crescentRatio / 2
-  const cpr = validatedCrescentRatio / 2;
+  // Howland eccentric photorefraction formula (Bobier & Braddick)
+  // SE = sign * K * (crescentRatio * workingDistance) / (flashEccentricity * pupilDiameter)
+  const sign = orientation === 'TOP' ? -1 : orientation === 'BOTTOM' ? +1 : 0;
+  let sphericalEq = sign * validatedOpticalConstantK *
+      (validatedCrescentRatio * validatedWorkingDistanceCm) /
+      (validatedFlashEccentricityMm * validatedPupilDiameterMm);
 
-  // Distance-corrected CPR (crescent appears smaller at greater distances)
-  const distanceCorrection = 45.0 / validatedDistanceCm;
-  const correctedCPR = cpr * distanceCorrection;
-
-  // AAPOS-based refractive error calculation using CPR lookup table
-  // Based on clinical photorefraction studies (e.g., Mohan et al., 2013; Li et al., 2019)
-  let sphericalEq = 0;
-  let classification: PhotorefractionData['classification'] = 'EMMETROPIA';
-
-  if (orientation === 'TOP') {
-    // Top crescent indicates Myopia (nearsightedness)
-    // AAPOS threshold: CPR > 0.15 suggests myopia
-    if (correctedCPR < 0.05) {
-      sphericalEq = 0; // Emmetropia
-    } else if (correctedCPR < 0.15) {
-      sphericalEq = -0.50; // Mild myopia
-    } else if (correctedCPR < 0.25) {
-      sphericalEq = -1.50; // Moderate myopia
-    } else if (correctedCPR < 0.35) {
-      sphericalEq = -3.00; // Moderate-high myopia
-    } else {
-      sphericalEq = -5.00 + (correctedCPR - 0.35) * 10; // High myopia
-    }
-  } else if (orientation === 'BOTTOM') {
-    // Bottom crescent indicates Hyperopia (farsightedness)
-    // AAPOS threshold: CPR > 0.12 suggests hyperopia
-    if (correctedCPR < 0.05) {
-      sphericalEq = 0; // Emmetropia
-    } else if (correctedCPR < 0.12) {
-      sphericalEq = 0.75; // Mild hyperopia
-    } else if (correctedCPR < 0.20) {
-      sphericalEq = 2.00; // Moderate hyperopia
-    } else {
-      sphericalEq = 3.50 + (correctedCPR - 0.20) * 8; // High hyperopia
-    }
-  } else {
-    // Symmetric / Minimal crescent -> near emmetropia
-    sphericalEq = (correctedCPR - 0.05) * 1.5;
-    if (Math.abs(sphericalEq) < 0.25) sphericalEq = 0;
-  }
+  if (orientation === 'SYMMETRIC') sphericalEq = 0; // Near emmetropia for symmetric case
 
   // Clamp to clinical range (-10.0 to +8.0 D)
   sphericalEq = Math.max(-10.0, Math.min(8.0, sphericalEq));
@@ -89,21 +96,7 @@ export function calculatePhotorefraction(
   sphericalEq = Math.round(sphericalEq * 4) / 4;
 
   // AAPOS Risk Classification
-  if (sphericalEq <= -6.0) {
-    classification = 'HIGH_MYOPIA';
-  } else if (sphericalEq <= -3.0) {
-    classification = 'MODERATE_MYOPIA';
-  } else if (sphericalEq <= -0.5) {
-    classification = 'MILD_MYOPIA';
-  } else if (sphericalEq >= 3.0) {
-    classification = 'HYPEROPIA';
-  } else if (sphericalEq >= 0.75) {
-    classification = 'HYPEROPIA'; // Mild hyperopia
-  } else {
-    classification = 'EMMETROPIA';
-  }
-
-  // AAPOS-defined Risk Category (matches classification)
+  const classification = classifyRefraction(sphericalEq);
   const aaposRiskCategory = classification;
 
   // Dynamic Luminance Slope (dL/dx across pupil profile)
@@ -113,7 +106,17 @@ export function calculatePhotorefraction(
   const rotationalAstigmatism = calculateRotationalAstigmatism(luminanceSlope * 0.12, luminanceSlope * 0.08);
 
   // CRADLE Leukocoria Risk (AAPOS threshold for abnormal red reflex)
-  const leukocoriaRisk = validatedReflexRatio > 0.88 || validatedReflexRatio < 0.35 ? 'CRADLE_POSITIVE' : 'NORMAL';
+  const leukocoriaRisk =
+    validatedReflexRatio > LEUKOCORIA_REFLEX_BOUNDS.UPPER || validatedReflexRatio < LEUKOCORIA_REFLEX_BOUNDS.LOWER
+      ? 'CRADLE_POSITIVE'
+      : 'NORMAL';
+
+  // Deterministic confidence score based on signal quality (80..96 range)
+  let confidenceScore = 88; // Base score
+  if (validatedReflexRatio >= 0.6 && validatedReflexRatio <= 0.92) confidenceScore += 4; // Good reflex range
+  if (validatedPupilDiameterMm >= 3.5 && validatedPupilDiameterMm <= 6.5) confidenceScore += 4; // Good pupil size range
+  if (validatedCrescentRatio === 0 || validatedCrescentRatio >= 0.8) confidenceScore -= 8; // Edge cases
+  confidenceScore = Math.max(55, Math.min(97, confidenceScore)); // Clamp to valid range
 
   return {
     pupilDiameterMm: Math.round(validatedPupilDiameterMm * 10) / 10,
@@ -123,12 +126,25 @@ export function calculatePhotorefraction(
     sphericalEquivalentDiopters: sphericalEq,
     astigmatismCylinderDiopters: rotationalAstigmatism.cylinderDiopters,
     classification,
-    confidenceScore: Math.round(88 + Math.random() * 8),
+    confidenceScore,
     luminanceSlope,
     aaposRiskCategory,
     leukocoriaRisk,
     rotationalAstigmatism,
   };
+}
+
+/**
+ * Maps a spherical equivalent (Diopters) to its AAPOS classification.
+ * Extracted from calculatePhotorefraction so the classification logic exists once.
+ */
+function classifyRefraction(sphericalEq: number): PhotorefractionData['classification'] {
+  if (sphericalEq <= AAPOS_THRESHOLDS.HIGH_MYOPIA) return 'HIGH_MYOPIA';
+  if (sphericalEq <= AAPOS_THRESHOLDS.MODERATE_MYOPIA) return 'MODERATE_MYOPIA';
+  if (sphericalEq <= AAPOS_THRESHOLDS.MILD_MYOPIA) return 'MILD_MYOPIA';
+  if (sphericalEq >= AAPOS_THRESHOLDS.HYPEROPIA) return 'HYPEROPIA';
+  if (sphericalEq >= AAPOS_THRESHOLDS.MILD_HYPEROPIA) return 'HYPEROPIA'; // Mild hyperopia
+  return 'EMMETROPIA';
 }
 
 /**
@@ -138,18 +154,22 @@ export function calculatePhotorefraction(
 export function calculateEyePhotorefraction(
   eyeData: {
     crescentRatio: number;
-    orientation: 'TOP' | 'BOTTOM' | 'SYMMETRIC';
+    orientation: CrescentOrientation;
     pupilDiameterMm: number;
     reflexRatio: number;
   },
-  distanceCm: number = 45.0
+  workingDistanceCm: number = 100,
+  flashEccentricityMm: number = 12,
+  opticalConstantK: number = 6.0
 ): EyeMetrics {
   const result = calculatePhotorefraction(
     eyeData.crescentRatio,
     eyeData.orientation,
     eyeData.pupilDiameterMm,
     eyeData.reflexRatio,
-    distanceCm
+    workingDistanceCm,
+    flashEccentricityMm,
+    opticalConstantK
   );
 
   return {
@@ -163,6 +183,10 @@ export function calculateEyePhotorefraction(
     confidenceScore: result.confidenceScore,
     luminanceSlope: result.luminanceSlope,
     rotationalAstigmatism: result.rotationalAstigmatism,
+    // NOTE: aaposRiskCategory and leukocoriaRisk are computed in `result` but
+    // intentionally omitted here because EyeMetrics does not currently declare
+    // them. If per-eye CRADLE/AAPOS reporting is needed, add these fields to
+    // the EyeMetrics type and surface them here rather than dropping silently.
   };
 }
 
@@ -175,15 +199,15 @@ export function calculateAnisometropia(
   osSE: number  // Left eye spherical equivalent
 ): { delta: number; risk: 'LOW' | 'MODERATE' | 'HIGH'; description: string } {
   const delta = Math.abs(odSE - osSE);
-  
+
   let risk: 'LOW' | 'MODERATE' | 'HIGH' = 'LOW';
   let description = 'Minimal difference between eyes - low amblyopia risk';
 
   // AAPOS thresholds for anisometropia amblyopia risk
-  if (delta >= 1.25) {
+  if (delta > ANISOMETROPIA_THRESHOLDS.HIGH) {
     risk = 'HIGH';
-    description = 'Significant anisometropia (≥1.25D) - high amblyopia risk, clinical evaluation recommended';
-  } else if (delta >= 0.75) {
+    description = 'Significant anisometropia (>2.0D) - high amblyopia risk, clinical evaluation recommended';
+  } else if (delta >= ANISOMETROPIA_THRESHOLDS.MODERATE) {
     risk = 'MODERATE';
     description = 'Moderate anisometropia (≥0.75D) - possible amblyopia risk, monitor closely';
   }
@@ -194,6 +218,10 @@ export function calculateAnisometropia(
     description,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Signal smoothing (Savitzky-Golay)
+// ---------------------------------------------------------------------------
 
 /**
  * Savitzky-Golay Filter for Smoothing Time-Series Data
@@ -267,16 +295,10 @@ function computeSavitzkyGolayCoefficients(
   return coeffsMatrix[0];
 }
 
-/**
- * Matrix transpose
- */
 function transposeMatrix(matrix: number[][]): number[][] {
   return matrix[0].map((_, colIndex) => matrix.map(row => row[colIndex]));
 }
 
-/**
- * Matrix multiplication
- */
 function multiplyMatrix(A: number[][], B: number[][]): number[][] {
   const result: number[][] = [];
   for (let i = 0; i < A.length; i++) {
@@ -333,6 +355,10 @@ function invertMatrix(matrix: number[][]): number[][] {
 
   return augmented.map(row => row.slice(n));
 }
+
+// ---------------------------------------------------------------------------
+// Fixation stability (BCEA)
+// ---------------------------------------------------------------------------
 
 /**
  * Calculates BCEA (Bivariate Contour Ellipse Area) in deg^2 from fixational points
@@ -427,6 +453,10 @@ function computeBCEAFromPoints(
     rho,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Multi-modal Bayesian risk fusion
+// ---------------------------------------------------------------------------
 
 /**
  * Multi-Modal Bayesian Fusion Engine
@@ -628,6 +658,10 @@ export function calculateMultiModalRisk(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Time-series signal processing (Gaussian smoothing, NPC break detection)
+// ---------------------------------------------------------------------------
+
 /**
  * Gaussian Smoothing for 1D Time-Series Signals
  * Formula: G(x) = (1 / sqrt(2*pi*sigma^2)) * exp(-x^2 / (2*sigma^2))
@@ -712,6 +746,10 @@ export function detectNPCBreak(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Microsaccade detection
+// ---------------------------------------------------------------------------
+
 /**
  * Engbert-Kliegl Velocity Threshold Algorithm for Microsaccade Detection
  * Computes eye movement velocities v_x, v_y, and velocity magnitude v
@@ -764,6 +802,10 @@ export function detectEngbertKlieglMicrosaccades(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Bayesian / linear risk baselines
+// ---------------------------------------------------------------------------
+
 /**
  * Beta-Bernoulli Bayesian Updating Fusion
  * Prior Beta(alpha=3.0, beta=7.0) -> 30% baseline risk
@@ -796,10 +838,9 @@ export function calculateBetaBernoulliRisk(evidence: {
   let alpha = 3.0; // Initial prior alpha
   let beta = 7.0; // Initial prior beta
 
-  Object.keys(evidence).forEach((key) => {
-    const k = key as keyof typeof evidence;
-    const obs = Math.max(0, Math.min(1, evidence[k]));
-    const w = weights[k] || 0.75;
+  (Object.keys(evidence) as (keyof typeof evidence)[]).forEach((key) => {
+    const obs = Math.max(0, Math.min(1, evidence[key]));
+    const w = weights[key] ?? 0.75;
 
     alpha += obs * w * 3.5;
     beta += (1 - obs) * w * 3.5;
@@ -848,6 +889,10 @@ export function calculateWeightedLinearRisk(
   };
 }
 
+// ---------------------------------------------------------------------------
+// External clinical model integrations
+// ---------------------------------------------------------------------------
+
 /**
  * 12-Month Myopia Progression Prediction Model (Li et al. 2024, Nature Sci Rep / Ophthalmology)
  * Trained on 612,530 medical records across 5 cohorts (R^2 = 0.964, MAE = 0.119 D, AUC = 0.99 for High Myopia)
@@ -863,14 +908,13 @@ export function predictMyopiaProgressionLi2024(
   const screenFactor = Math.max(0, patient.dailyScreenHours) / 8.0; // normalized
 
   // Li et al. (2024) regression formula
-  // Corrected: SE coefficient changed from -0.145 to +0.145 to reflect that higher myopia leads to faster progression
   let predictedChange12M =
-    -0.082 +
-    0.145 * baseSE -
-    0.038 * isPediatric -
-    0.120 * geneticLoad -
-    0.045 * screenFactor +
-    0.052 * outdoorFactor;
+    LI2024_COEFFICIENTS.intercept +
+    LI2024_COEFFICIENTS.se * baseSE +
+    LI2024_COEFFICIENTS.pediatric * isPediatric +
+    LI2024_COEFFICIENTS.geneticLoad * geneticLoad +
+    LI2024_COEFFICIENTS.screenFactor * screenFactor +
+    LI2024_COEFFICIENTS.outdoorFactor * outdoorFactor;
 
   if (baseSE <= 0) {
     predictedChange12M = Math.min(-0.10, Math.max(-2.25, predictedChange12M));
@@ -938,6 +982,10 @@ export function predict5YearHighMyopiaRiskFoo2023(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Astigmatism / power vector math
+// ---------------------------------------------------------------------------
+
 /**
  * Rotational Capture Dual-Meridian Astigmatism Analysis (90-degree Device Rotation Protocol)
  * Extracts cylindrical diopters and axis via J0 / J45 vector component transformation
@@ -951,9 +999,7 @@ export function calculateRotationalAstigmatism(
   const j45 = obliqueSlope / 2.0;
 
   const cylinderPower = Math.round(Math.sqrt(j0 * j0 + j45 * j45) * 4.0 * 4) / 4;
-  const axisRad = 0.5 * Math.atan2(j45, Math.max(0.001, j0));
-  let axisDegrees = Math.round((axisRad * 180) / Math.PI);
-  if (axisDegrees < 0) axisDegrees += 180;
+  const axisDegrees = j0AndJ45ToAxisDegrees(j0, j45);
 
   return {
     cylinderDiopters: -Math.abs(cylinderPower),
@@ -961,6 +1007,20 @@ export function calculateRotationalAstigmatism(
     j0: Math.round(j0 * 100) / 100,
     j45: Math.round(j45 * 100) / 100,
   };
+}
+
+/**
+ * Converts J0/J45 Fourier components to an axis in degrees [0, 180).
+ * Only guards the true zero-vector case (j0 === 0 && j45 === 0); does NOT
+ * clamp a legitimately negative j0, since that simply corresponds to an
+ * axis beyond 90 degrees and clamping it would corrupt the result.
+ */
+function j0AndJ45ToAxisDegrees(j0: number, j45: number): number {
+  if (j0 === 0 && j45 === 0) return 0;
+  const axisRad = 0.5 * Math.atan2(j45, j0);
+  let axisDegrees = Math.round((axisRad * 180) / Math.PI);
+  if (axisDegrees < 0) axisDegrees += 180;
+  return axisDegrees;
 }
 
 /**
@@ -994,10 +1054,7 @@ export function reconstitutePrescription(
 ): { sphere: number; cylinder: number; axis: number } {
   const cylinder = -2 * Math.sqrt(J0 * J0 + J45 * J45);
   const sphere = M - cylinder / 2;
-  
-  let axisRad = 0.5 * Math.atan2(J45, Math.max(0.001, J0));
-  let axis = Math.round((axisRad * 180) / Math.PI);
-  if (axis < 0) axis += 180;
+  const axis = j0AndJ45ToAxisDegrees(J0, J45);
 
   return {
     sphere: Math.round(sphere * 100) / 100,
@@ -1014,7 +1071,7 @@ export function reconstitutePrescription(
 export function defocusToLogMAR(diopters: number): { logMAR: number; snellen: string } {
   const absD = Math.abs(diopters);
   const logMAR = Math.min(1.0, Math.max(0.0, absD * 0.18));
-  
+
   const snellenDenominator = Math.round(20 * Math.pow(10, logMAR));
   const snellen = `20/${snellenDenominator}`;
 
@@ -1033,14 +1090,14 @@ export function calculateAmblyopiaRiskFactor(
   leftEyeSE: number
 ): { deltaM: number; riskLevel: 'HIGH' | 'MODERATE' | 'LOW'; riskDescription: string } {
   const deltaM = Math.abs(rightEyeSE - leftEyeSE);
-  
+
   let riskLevel: 'HIGH' | 'MODERATE' | 'LOW' = 'LOW';
   let riskDescription = 'Low risk - minimal anisometropia';
 
-  if (deltaM > 1.25 || deltaM > 2.0) {
+  if (deltaM > ARF_THRESHOLDS.HIGH) {
     riskLevel = 'HIGH';
     riskDescription = 'High risk - significant anisometropia requiring clinical evaluation';
-  } else if (deltaM >= 0.75) {
+  } else if (deltaM >= ARF_THRESHOLDS.MODERATE) {
     riskLevel = 'MODERATE';
     riskDescription = 'Moderate risk - anisometropia may contribute to amblyopia';
   }
@@ -1051,6 +1108,10 @@ export function calculateAmblyopiaRiskFactor(
     riskDescription,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Pupil oscillation frequency analysis (fatigue)
+// ---------------------------------------------------------------------------
 
 /**
  * High-Frequency Micro-Fluctuations (HFF) Analysis
@@ -1125,6 +1186,8 @@ export function analyzeHighFrequencyMicroFluctuations(
  */
 function optimizedFFT(input: number[]): { re: number; im: number }[] {
   const n = input.length;
+  if (n === 0) return [];
+
   const paddedLength = Math.pow(2, Math.ceil(Math.log2(n)));
   const padded = new Array(paddedLength).fill(0);
   for (let i = 0; i < n; i++) {
@@ -1155,18 +1218,18 @@ function optimizedFFT(input: number[]): { re: number; im: number }[] {
   for (let size = 2; size <= paddedLength; size *= 2) {
     const halfSize = size / 2;
     const angle = -2 * Math.PI / size;
-    
+
     for (let i = 0; i < paddedLength; i += size) {
       for (let j = 0; j < halfSize; j++) {
         const idx1 = i + j;
         const idx2 = i + j + halfSize;
-        
+
         const cos = Math.cos(angle * j);
         const sin = Math.sin(angle * j);
-        
+
         const tRe = result[idx2].re * cos - result[idx2].im * sin;
         const tIm = result[idx2].re * sin + result[idx2].im * cos;
-        
+
         result[idx2].re = result[idx1].re - tRe;
         result[idx2].im = result[idx1].im - tIm;
         result[idx1].re += tRe;

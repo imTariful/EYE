@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Step,
   PatientProfile,
@@ -81,10 +81,11 @@ export default function App() {
 
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [isDisclaimerOpen, setIsDisclaimerOpen] = useState(false);
+  const restoringRef = useRef(false);
 
   // Save scan session to history when Step 6 is reached
   useEffect(() => {
-    if (currentStep === 6) {
+    if (currentStep === 6 && !restoringRef.current) {
       const session: ScanSession = {
         id: `scan-${Date.now()}`,
         createdAt: new Date().toISOString(),
@@ -105,6 +106,10 @@ export default function App() {
         return updated;
       });
     }
+    // Reset the restoring flag after the effect runs
+    if (restoringRef.current) {
+      restoringRef.current = false;
+    }
   }, [currentStep]);
 
   const handleResetScan = () => {
@@ -117,6 +122,7 @@ export default function App() {
   };
 
   const handleSelectSession = (session: ScanSession) => {
+    restoringRef.current = true;
     setPatient(session.patient);
     setPhotorefraction(session.photorefraction);
     setAccommodative(session.accommodative);
