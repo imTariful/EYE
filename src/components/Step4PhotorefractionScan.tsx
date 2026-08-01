@@ -53,6 +53,16 @@ const VIDEO_SAMPLE_FPS = 5;
 const VIDEO_SAMPLE_MAX_FRAMES = 30;
 
 // ---------------------------------------------------------------------------
+// Auto-capture threshold constants
+// ---------------------------------------------------------------------------
+const AUTO_CAPTURE_TARGET_DISTANCE_CM = 100; // Target working distance (1 meter)
+const AUTO_CAPTURE_DISTANCE_TOLERANCE_CM = 10; // Acceptable range: 90-110cm
+const AUTO_CAPTURE_MIN_AMBIENT_LIGHT = 30; // Minimum average brightness (0-255) for dark room
+const AUTO_CAPTURE_MAX_AMBIENT_LIGHT = 120; // Maximum average brightness (room shouldn't be too bright)
+const AUTO_CAPTURE_GAZE_ANGLE_THRESHOLD_DEG = 15; // Maximum gaze angle deviation from camera
+const AUTO_CAPTURE_STABLE_FRAMES_REQUIRED = 10; // Consecutive stable frames before auto-trigger
+
+// ---------------------------------------------------------------------------
 // Pure helpers -- identical contract to Step3AccommodativeScan's local copy.
 // If a third step ends up needing the same stability gate, this is the
 // signal to promote it into eyeTracker.ts so every step shares one
@@ -71,6 +81,28 @@ function isFrameStable(result: PupilFrameResult): boolean {
 function grayscaleAt(data: Uint8ClampedArray, width: number, px: number, py: number): number {
   const idx = (py * width + px) * 4;
   return 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+}
+
+function isAutoCaptureReady(result: PupilFrameResult): boolean {
+  if (!result.detected) return false;
+  if (result.isBlinking || result.isObscured) return false;
+
+  // Distance check: must be within tolerance of target (100cm ± 10cm)
+  const distance = result.zDistanceCm || 0;
+  const distanceOk = Math.abs(distance - AUTO_CAPTURE_TARGET_DISTANCE_CM) <= AUTO_CAPTURE_DISTANCE_TOLERANCE_CM;
+
+  // Ambient light check: room should be dark enough but not too bright
+  const ambientLight = result.ambientLightLevel || 128;
+  const lightOk = ambientLight >= AUTO_CAPTURE_MIN_AMBIENT_LIGHT && ambientLight <= AUTO_CAPTURE_MAX_AMBIENT_LIGHT;
+
+  // Gaze direction check: eyes should be looking at camera
+  const gazeAngle = result.gazeAngleDeg || 0;
+  const gazeOk = gazeAngle <= AUTO_CAPTURE_GAZE_ANGLE_THRESHOLD_DEG;
+
+  // Confidence check
+  const confidenceOk = result.confidenceScore >= MIN_CONFIDENCE_TO_PROCEED;
+
+  return distanceOk && lightOk && gazeOk && confidenceOk;
 }
 
 export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> = ({
@@ -109,6 +141,11 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
   // Navigation Guard State
   const [stableFrameCount, setStableFrameCount] = useState(0);
   const [canProceed, setCanProceed] = useState(false);
+
+  // Auto-capture state
+  const [autoCaptureEnabled, setAutoCaptureEnabled] = useState(false);
+  const [autoCaptureReady, setAutoCaptureReady] = useState(false);
+  const [autoCaptureStableFrames, setAutoCaptureStableFrames] = useState(0);
 
   // Live Pupil Tracker Metrics
   const [liveMetrics, setLiveMetrics] = useState<PupilFrameResult>({
@@ -279,7 +316,7 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
         const stable = isFrameStable(result);
 
         if (stable) {
-          setStableFrameCount((prev) => {
+          setStableFrameCount((prev: number) => {
             const newCount = prev + 1;
             if (newCount >= MIN_STABLE_FRAMES_REQUIRED && !canProceed) {
               setCanProceed(true);
@@ -289,6 +326,29 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
         } else {
           setStableFrameCount(0);
           setCanProceed(false);
+        }
+
+        // Auto-capture logic: check if conditions are perfect
+        if (autoCaptureEnabled && !isCapturing) {
+          const ready = isAutoCaptureReady(result);
+          setAutoCaptureReady(ready);
+
+          if (ready) {
+            setAutoCaptureStableFrames((prev: number) => {
+              const newCount = prev + 1;
+              // Trigger auto-capture when conditions stable for required frames
+              if (newCount >= AUTO_CAPTURE_STABLE_FRAMES_REQUIRED) {
+                // Disable auto-capture temporarily to prevent multiple triggers
+                setAutoCaptureEnabled(false);
+                setAutoCaptureStableFrames(0);
+                // Trigger flash capture
+                handleFlashCapture();
+              }
+              return newCount;
+            });
+          } else {
+            setAutoCaptureStableFrames(0);
+          }
         }
       }
       animFrameRef.current = requestAnimationFrame(processLoop);
@@ -881,6 +941,65 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
                 </div>
               )}
             </div>
+          </div>
+
+          {/* Auto-Capture Toggle */}
+          <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800 space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <Zap className={`w-4 h-4 ${autoCaptureEnabled ? 'text-amber-400' : 'text-slate-500'}`} />
+                <span className="text-xs font-semibold text-slate-300">Auto-Capture Mode</span>
+              </div>
+              <button
+                onClick={() => {
+                  setAutoCaptureEnabled(!autoCaptureEnabled);
+                  setAutoCaptureStableFrames(0);
+                  setAutoCaptureReady(false);
+                }}
+                disabled={!isCameraActive}
+                className={`relative w-12 h-6 rounded-full transition-colors cursor-pointer ${
+                  autoCaptureEnabled ? 'bg-amber-500' : 'bg-slate-700'
+                } ${!isCameraActive ? 'opacity-50 cursor-not-allowed' : ''}`}
+              >
+                <div
+                  className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform ${
+                    autoCaptureEnabled ? 'translate-x-7' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+            
+            {/* Auto-capture status feedback */}
+            {autoCaptureEnabled && isCameraActive && (
+              <div className="space-y-1.5 pt-2 border-t border-slate-800">
+                <div className="flex items-center justify-between text-[10px]">
+                  <span className="text-slate-400">Distance (100cm ±10cm):</span>
+                  <span className={`font-mono ${liveMetrics.zDistanceCm && Math.abs(liveMetrics.zDistanceCm - AUTO_CAPTURE_TARGET_DISTANCE_CM) <= AUTO_CAPTURE_DISTANCE_TOLERANCE_CM ? 'text-emerald-400' : 'text-amber-400'}`}>
+                    {liveMetrics.zDistanceCm ? `${Math.round(liveMetrics.zDistanceCm)}cm` : '—'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-[10px]">
+                  <span className="text-slate-400">Room Light (dark):</span>
+                  <span className={`font-mono ${liveMetrics.ambientLightLevel && liveMetrics.ambientLightLevel >= AUTO_CAPTURE_MIN_AMBIENT_LIGHT && liveMetrics.ambientLightLevel <= AUTO_CAPTURE_MAX_AMBIENT_LIGHT ? 'text-emerald-400' : 'text-amber-400'}`}>
+                    {liveMetrics.ambientLightLevel ? `${Math.round(liveMetrics.ambientLightLevel)}` : '—'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-[10px]">
+                  <span className="text-slate-400">Gaze Direction:</span>
+                  <span className={`font-mono ${liveMetrics.gazeAngleDeg && liveMetrics.gazeAngleDeg <= AUTO_CAPTURE_GAZE_ANGLE_THRESHOLD_DEG ? 'text-emerald-400' : 'text-amber-400'}`}>
+                    {liveMetrics.gazeAngleDeg ? `${liveMetrics.gazeAngleDeg.toFixed(1)}°` : '—'}
+                  </span>
+                </div>
+                {autoCaptureReady && (
+                  <div className="bg-emerald-500/20 border border-emerald-500/40 rounded-lg p-2 mt-2">
+                    <div className="flex items-center space-x-2 text-emerald-400 text-[10px] font-semibold">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>Conditions perfect! Auto-capturing in {AUTO_CAPTURE_STABLE_FRAMES_REQUIRED - autoCaptureStableFrames} frames...</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Capture Trigger */}

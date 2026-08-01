@@ -49,6 +49,8 @@ export interface PupilFrameResult {
   isFocused?: boolean;
   zDistanceCm?: number;
   zDistanceConfident?: boolean;
+  ambientLightLevel?: number; // Average frame brightness (0-255) for room light detection
+  gazeAngleDeg?: number; // Gaze angle deviation from camera center (degrees)
   cradleLeukocoriaPositive?: boolean;
 }
 
@@ -576,6 +578,42 @@ export class EyeTrackerEngine {
     // CRADLE Multi-Frame Temporal Aggregation for Leukocoria
     const cradleRes = this.cradleDetector.processFrame(redReflex, options.flashActive);
 
+    // Ambient light level detection (average frame brightness)
+    let ambientLightLevel = 128; // Default middle value
+    try {
+      const sampleStride = 20; // Sample every 20th pixel for performance
+      let totalBrightness = 0;
+      let sampleCount = 0;
+      const fullImgData = this.ctx.getImageData(0, 0, width, height);
+      const data = fullImgData.data;
+      for (let i = 0; i < data.length; i += 4 * sampleStride) {
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        const brightness = 0.299 * r + 0.587 * g + 0.114 * b;
+        totalBrightness += brightness;
+        sampleCount++;
+      }
+      ambientLightLevel = sampleCount > 0 ? totalBrightness / sampleCount : 128;
+    } catch (e) {
+      ambientLightLevel = 128;
+    }
+
+    // Gaze angle calculation (deviation from camera center)
+    let gazeAngleDeg = 0;
+    if (leftPupil && rightPupil) {
+      const midX = (leftPupil.x + rightPupil.x) / 2;
+      const midY = (leftPupil.y + rightPupil.y) / 2;
+      const centerX = width / 2;
+      const centerY = height / 2;
+      const offsetX = midX - centerX;
+      const offsetY = midY - centerY;
+      // Approximate angle based on offset from center (assuming ~60° FOV at 1280px width)
+      const horizontalAngle = (offsetX / width) * 60;
+      const verticalAngle = (offsetY / height) * 45;
+      gazeAngleDeg = Math.sqrt(horizontalAngle * horizontalAngle + verticalAngle * verticalAngle);
+    }
+
     // IPD-based fallback only if the iris-ruler path above never ran (e.g. Tier 2 CV only)
     if (estimatedPupilMm === 5.5 && leftPupil && rightPupil) {
       const ipdPx = Math.sqrt(Math.pow(leftPupil.x - rightPupil.x, 2) + Math.pow(leftPupil.y - rightPupil.y, 2));
@@ -690,6 +728,8 @@ export class EyeTrackerEngine {
       isFocused: blurInfo.isFocused,
       zDistanceCm,
       zDistanceConfident,
+      ambientLightLevel: Math.round(ambientLightLevel),
+      gazeAngleDeg: Math.round(gazeAngleDeg * 10) / 10,
       cradleLeukocoriaPositive: cradleRes.isPositive,
     };
   }
