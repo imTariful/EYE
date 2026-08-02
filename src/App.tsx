@@ -39,7 +39,7 @@ const DEFAULT_PATIENT: PatientProfile = {
   },
 };
 
-const DEFAULT_PHOTOREFRACTION = calculatePhotorefraction(0.28, 'TOP', 4.2, 0.88);
+const DEFAULT_PHOTOREFRACTION = calculatePhotorefraction(0.28, 'TOP', 5.5, 0.85);
 
 const DEFAULT_ACCOMMODATIVE: AccommodativeData = {
   npcCm: 8.5,
@@ -206,6 +206,7 @@ export default function App() {
 
           {currentStep === 4 && (
             <Step4PhotorefractionScan
+              patient={patient}
               photorefraction={photorefraction}
               onSave={setPhotorefraction}
               onNext={() => {

@@ -120,11 +120,9 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
         signal: controller.signal,
       });
 
-      if (!res.ok) throw new Error(`Chat API returned ${res.status}`);
-
       const data = await res.json();
       const aiReply: string | undefined = data.reply || data.fallbackReply;
-      if (!aiReply) throw new Error('Empty reply from chat API');
+      if (!aiReply) throw new Error(`Chat API returned ${res.status} without a fallback reply`);
 
       setMessages((prev) => [
         ...prev,
@@ -161,9 +159,8 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session }),
       });
-      if (!res.ok) throw new Error(`Report API returned ${res.status}`);
       const data = await res.json();
-      if (!data.reportMarkdown) throw new Error('Report API returned no content');
+      if (!data.reportMarkdown) throw new Error(`Report API returned ${res.status} without a fallback report`);
       setReportMarkdown(data.reportMarkdown);
       setShowReportModal(true);
     } catch (err) {

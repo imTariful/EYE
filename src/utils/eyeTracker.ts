@@ -58,6 +58,9 @@ export interface PupilFrameResult {
   pupilDiameterMm: number;
   redReflexIntensity: number;
   crescentRatio: number;
+  crescentOrientation?: 'TOP' | 'BOTTOM' | 'SYMMETRIC';
+  /** True when pupil mm came from the iris-as-ruler path (MediaPipe tier). */
+  pupilMmFromIrisRuler?: boolean;
   fps: number;
   confidenceScore: number;
   ear: number;
@@ -528,10 +531,38 @@ export class EyeTrackerEngine {
             blendshapeBlinkR = findScore('eyeBlinkRight');
           }
 
+          let landmarkMetrics: ReturnType<EyeTrackerEngine['extractOpticalMetricsFromLandmarks']> = null;
+          try {
+            landmarkMetrics = this.extractOpticalMetricsFromLandmarks(
+              landmarks,
+              this.ctx.getImageData(0, 0, width, height),
+              width,
+              height,
+              !!options.isChild,
+            );
+          } catch (e) {
+            landmarkMetrics = null;
+          }
+
+          if (landmarkMetrics) {
+            const smoothL = this.leftSmoother.update(landmarkMetrics.leftEye.x, landmarkMetrics.leftEye.y, dt);
+            const smoothR = this.rightSmoother.update(landmarkMetrics.rightEye.x, landmarkMetrics.rightEye.y, dt);
+            leftPupil = { ...landmarkMetrics.leftEye, x: smoothL.x, y: smoothL.y };
+            rightPupil = { ...landmarkMetrics.rightEye, x: smoothR.x, y: smoothR.y };
+            confidenceScore = 98;
+            estimatedPupilMm = landmarkMetrics.pupilDiameterMm;
+            pupilMmMeasuredFromIris = true;
+            zDistanceCm = landmarkMetrics.zDistanceCm;
+            zDistanceConfident = true;
+            imgDataForPupil = landmarkMetrics.crop;
+          }
+
           const leftIrisCenter = landmarks[468];
           const rightIrisCenter = landmarks[473];
 
-          if (leftIrisCenter && rightIrisCenter) {
+          // Retain the former path only as a defensive fallback when the shared
+          // iris-ruler extraction cannot form two valid pupil boundaries.
+          if (!landmarkMetrics && leftIrisCenter && rightIrisCenter) {
             const rawLX = leftIrisCenter.x * width;
             const rawLY = leftIrisCenter.y * height;
             const rawRX = rightIrisCenter.x * width;
@@ -602,16 +633,19 @@ export class EyeTrackerEngine {
             };
             confidenceScore = leftPupilBoundary && rightPupilBoundary ? 98 : 88;
 
-            // Pupil mm from the ACTUAL measured radius, not a constant
+            // Iris-as-ruler: pupil mm derived from the 11.7mm iris biological constant —
+            // focal-length-independent (Howland, 1974).
+            //   pixelsPerMm = irisDiameterPx / 11.7
+            //   pupilDiameterMm = pupilDiameterPx / pixelsPerMm
             const avgPupilRadiusPx = (leftRadiusPx + rightRadiusPx) / 2;
-            const pupilMm = (avgPupilRadiusPx * 2) / Math.max(0.01, pixelsPerMm);
+            const pupilDiameterPx = avgPupilRadiusPx * 2;
+            const pupilMm = pupilDiameterPx / Math.max(0.01, pixelsPerMm);
             estimatedPupilMm = Math.max(2.0, Math.min(8.0, pupilMm));
             pupilMmMeasuredFromIris = true;
 
-            // Distance: iris-pinhole model is the primary estimate (physically grounded,
-            // if uncalibrated on focal length). MediaPipe's raw landmark z is normalized
-            // to face width, not metric depth, so it's used only as a sanity check, not
-            // averaged in blindly.
+            // Distance: the iris-pinhole model is the sole estimate. MediaPipe landmark
+            // Z was evaluated but is intentionally unused because it is normalized to
+            // face width, not calibrated metric depth, making it less defensible here.
             if (avgIrisDiameterPx > 10) {
               const pinhole = estimateDistancePinholeModel(avgIrisDiameterPx, !!options.isChild, APPROX_FOCAL_LENGTH_PX);
               zDistanceCm = pinhole.distanceCm;
@@ -706,9 +740,39 @@ export class EyeTrackerEngine {
       const avgPupilRadiusPx = (leftPupil.radius + rightPupil.radius) / 2;
       estimatedPupilMm = (avgPupilRadiusPx / pixelsPerMm) * 2;
       estimatedPupilMm = Math.max(2.0, Math.min(8.0, estimatedPupilMm));
+      // Tier-2 lacks iris landmarks — flag lower confidence than iris-ruler path
+      confidenceScore = Math.min(confidenceScore || 75, 68);
     }
 
-    const estimatedCrescent = Math.min(0.5, Math.max(0.1, 0.2 + (5.0 - estimatedPupilMm) * 0.04));
+    // Crescent ratio from red-reflex brightness distribution across the pupil region
+    let estimatedCrescent = Math.min(0.5, Math.max(0.1, 0.2 + (5.0 - estimatedPupilMm) * 0.04));
+    let crescentOrientation: 'TOP' | 'BOTTOM' | 'SYMMETRIC' = estimatedCrescent > 0.25 ? 'TOP' : 'SYMMETRIC';
+    if (imgDataForPupil && leftPupil && rightPupil) {
+      const offX = (imgDataForPupil as any).__offsetX ?? 0;
+      const offY = (imgDataForPupil as any).__offsetY ?? 0;
+      const localLeft = { x: leftPupil.x - offX, y: leftPupil.y - offY, radius: leftPupil.radius };
+      const localRight = { x: rightPupil.x - offX, y: rightPupil.y - offY, radius: rightPupil.radius };
+      const crescentEst = estimateCrescentFromPupilRegion(imgDataForPupil, localLeft, localRight);
+      estimatedCrescent = crescentEst.crescentRatio;
+      crescentOrientation = crescentEst.orientation;
+    } else if (leftPupil || rightPupil) {
+      let regionImgData: ImageData | null = null;
+      const eyeRegion = computeEyeRegionBounds(leftPupil, rightPupil, width, height);
+      try {
+        regionImgData = this.ctx.getImageData(eyeRegion.x, eyeRegion.y, eyeRegion.w, eyeRegion.h);
+      } catch (e) {}
+      if (regionImgData) {
+        const localLeft = leftPupil
+          ? { x: leftPupil.x - eyeRegion.x, y: leftPupil.y - eyeRegion.y, radius: leftPupil.radius }
+          : null;
+        const localRight = rightPupil
+          ? { x: rightPupil.x - eyeRegion.x, y: rightPupil.y - eyeRegion.y, radius: rightPupil.radius }
+          : null;
+        const crescentEst = estimateCrescentFromPupilRegion(regionImgData, localLeft, localRight);
+        estimatedCrescent = crescentEst.crescentRatio;
+        crescentOrientation = crescentEst.orientation;
+      }
+    }
 
     // Eye Aspect Ratio (EAR) for blink & eyelid obscuration detection, fused with
     // blendshape blink scores when available (blendshapes hold up better off-axis).
@@ -797,14 +861,16 @@ export class EyeTrackerEngine {
     }
 
     return {
-      detected: !!(leftPupil || rightPupil),
+      detected: !!(leftPupil && rightPupil),
       leftEye: leftPupil,
       rightEye: rightPupil,
       pupilDiameterMm: Math.round(estimatedPupilMm * 10) / 10,
       redReflexIntensity: Math.round(redReflex * 100) / 100,
       crescentRatio: Math.round(estimatedCrescent * 100) / 100,
+      crescentOrientation,
+      pupilMmFromIrisRuler: pupilMmMeasuredFromIris,
       fps: this.currentFps,
-      confidenceScore: confidenceScore || (leftPupil && rightPupil ? 92 : 65),
+      confidenceScore: confidenceScore || (leftPupil && rightPupil ? 92 : 50),
       ear: Math.round(calculatedEar * 100) / 100,
       isBlinking,
       isObscured,
@@ -836,6 +902,81 @@ export class EyeTrackerEngine {
   }
 
   /**
+   * Extracts iris-ruler optical measurements from FaceLandmarker output. Keeping
+   * this in one place makes live video and static uploads use identical pupil
+   * calibration and pixel sampling.
+   */
+  private extractOpticalMetricsFromLandmarks(
+    landmarks: any[],
+    imgData: ImageData,
+    width: number,
+    height: number,
+    isChild: boolean,
+  ): {
+    leftEye: { x: number; y: number; radius: number; brightness: number };
+    rightEye: { x: number; y: number; radius: number; brightness: number };
+    pupilDiameterMm: number;
+    redReflex: number;
+    crescentRatio: number;
+    crescentOrientation: 'TOP' | 'BOTTOM' | 'SYMMETRIC';
+    zDistanceCm: number;
+    crop: ImageData;
+  } | null {
+    const leftIrisCenter = landmarks[468];
+    const rightIrisCenter = landmarks[473];
+    if (!leftIrisCenter || !rightIrisCenter) return null;
+
+    const leftIrisDiameterPx = irisRingDiameterPx(landmarks, 469, 471, 470, 472, width, height, leftIrisCenter);
+    const rightIrisDiameterPx = irisRingDiameterPx(landmarks, 474, 476, 475, 477, width, height, rightIrisCenter);
+    const avgIrisDiameterPx = (leftIrisDiameterPx + rightIrisDiameterPx) / 2;
+    if (avgIrisDiameterPx <= 0) return null;
+
+    const padding = Math.ceil(avgIrisDiameterPx * 0.7) || 20;
+    const cropX = Math.max(0, Math.round(Math.min(leftIrisCenter.x, rightIrisCenter.x) * width - padding));
+    const cropY = Math.max(0, Math.round(Math.min(leftIrisCenter.y, rightIrisCenter.y) * height - padding));
+    const cropW = Math.min(width - cropX, Math.round(Math.abs(rightIrisCenter.x - leftIrisCenter.x) * width + padding * 2));
+    const cropH = Math.min(height - cropY, Math.round(padding * 2 + Math.max(leftIrisDiameterPx, rightIrisDiameterPx)));
+    if (cropW <= 4 || cropH <= 4) return null;
+
+    const crop = cropImageData(imgData, cropX, cropY, cropW, cropH);
+    (crop as any).__offsetX = cropX;
+    (crop as any).__offsetY = cropY;
+
+    const leftBoundary = findPupilBoundary(crop, leftIrisCenter.x * width, leftIrisCenter.y * height, leftIrisDiameterPx / 2);
+    const rightBoundary = findPupilBoundary(crop, rightIrisCenter.x * width, rightIrisCenter.y * height, rightIrisDiameterPx / 2);
+    if (!leftBoundary || !rightBoundary) return null;
+
+    const leftEye = {
+      x: leftBoundary.centerXFrame,
+      y: leftBoundary.centerYFrame,
+      radius: Math.round(leftBoundary.radius),
+      brightness: leftBoundary.brightness,
+    };
+    const rightEye = {
+      x: rightBoundary.centerXFrame,
+      y: rightBoundary.centerYFrame,
+      radius: Math.round(rightBoundary.radius),
+      brightness: rightBoundary.brightness,
+    };
+    const pixelsPerMm = avgIrisDiameterPx / (isChild ? CHILD_IRIS_CONSTANT_MM : IRIS_BIOLOGICAL_CONSTANT_MM);
+    const pupilDiameterMm = Math.max(2, Math.min(8, ((leftEye.radius + rightEye.radius) / pixelsPerMm)));
+    const localLeft = { x: leftEye.x - cropX, y: leftEye.y - cropY, radius: leftEye.radius };
+    const localRight = { x: rightEye.x - cropX, y: rightEye.y - cropY, radius: rightEye.radius };
+    const crescent = estimateCrescentFromPupilRegion(crop, localLeft, localRight);
+
+    return {
+      leftEye,
+      rightEye,
+      pupilDiameterMm,
+      redReflex: this.computeRedChannelRatio(crop, localLeft, localRight),
+      crescentRatio: crescent.crescentRatio,
+      crescentOrientation: crescent.orientation,
+      zDistanceCm: Math.max(20, Math.min(120, estimateDistancePinholeModel(avgIrisDiameterPx, isChild, APPROX_FOCAL_LENGTH_PX).distanceCm)),
+      crop,
+    };
+  }
+
+  /**
    * Advanced Computer Vision Algorithm for Robust Eye Localization (fallback when
    * MediaPipe is unavailable):
    * 1. YCbCr Skin Tone Segmentation -> Dynamic Face Bounding Box
@@ -845,7 +986,8 @@ export class EyeTrackerEngine {
   private detectEyesAdvancedCV(
     imgData: ImageData,
     width: number,
-    height: number
+    height: number,
+    options: { strict?: boolean } = {},
   ): {
     leftEye: { x: number; y: number; radius: number; brightness: number } | null;
     rightEye: { x: number; y: number; radius: number; brightness: number } | null;
@@ -880,6 +1022,11 @@ export class EyeTrackerEngine {
     }
 
     if (skinPixelCount < 100 || maxX - minX < width * 0.15) {
+      // Strict mode (static uploads): no skin-tone face box => no eye — prevents
+      // bed-sheet / wall false positives from the full-frame fallback search.
+      if (options.strict) {
+        return { leftEye: null, rightEye: null, confidence: 0 };
+      }
       minX = Math.floor(width * 0.15);
       maxX = Math.floor(width * 0.85);
       minY = Math.floor(height * 0.15);
@@ -1087,7 +1234,7 @@ export class EyeTrackerEngine {
   /**
    * Processes a static image (HTMLImageElement or HTMLCanvasElement) for photorefraction analysis
    */
-  public processImage(image: HTMLImageElement | HTMLCanvasElement): {
+  public processImage(image: HTMLImageElement | HTMLCanvasElement, isChild: boolean = false): {
     photo: PhotorefractionData | null;
     metrics: PupilFrameResult;
   } {
@@ -1116,20 +1263,73 @@ export class EyeTrackerEngine {
       return { photo: null, metrics: this.emptyResult() };
     }
 
-    const cvResult = this.detectEyesAdvancedCV(imgData, width, height);
+    let mediaPipeMetrics: PupilFrameResult | null = null;
+    if (this.mediaPipeReady && this.faceLandmarker) {
+      try {
+        const results = this.faceLandmarker.detectForVideo(this.canvas, performance.now());
+        const landmarks = results.faceLandmarks?.[0];
+        if (landmarks) {
+          const optical = this.extractOpticalMetricsFromLandmarks(landmarks, imgData, width, height, isChild);
+          if (optical) {
+            mediaPipeMetrics = {
+              detected: true,
+              leftEye: optical.leftEye,
+              rightEye: optical.rightEye,
+              pupilDiameterMm: Math.round(optical.pupilDiameterMm * 10) / 10,
+              redReflexIntensity: Math.round(optical.redReflex * 100) / 100,
+              crescentRatio: optical.crescentRatio,
+              crescentOrientation: optical.crescentOrientation,
+              pupilMmFromIrisRuler: true,
+              fps: 0,
+              confidenceScore: 98,
+              ear: 0.26,
+              isBlinking: false,
+              isObscured: false,
+              zDistanceCm: optical.zDistanceCm,
+              zDistanceConfident: true,
+            };
+          }
+        }
+      } catch (error) {
+        console.warn('MediaPipe static-image detection failed; using CV fallback.', error);
+      }
+    }
 
-    if (!cvResult.leftEye && !cvResult.rightEye) {
+    if (mediaPipeMetrics) {
+      const photo: PhotorefractionData = {
+        pupilDiameterMm: mediaPipeMetrics.pupilDiameterMm,
+        redReflexIntensityRatio: mediaPipeMetrics.redReflexIntensity,
+        crescentHeightRatio: mediaPipeMetrics.crescentRatio,
+        crescentOrientation: mediaPipeMetrics.crescentOrientation ?? 'SYMMETRIC',
+        // Placeholders: Step4 recalculates these with calculatePhotorefraction.
+        sphericalEquivalentDiopters: 0,
+        astigmatismCylinderDiopters: -0.5,
+        classification: 'EMMETROPIA',
+        confidenceScore: mediaPipeMetrics.confidenceScore,
+      };
+      return { photo, metrics: mediaPipeMetrics };
+    }
+
+    // Tier 2 fallback when MediaPipe is unavailable or finds no face.
+    const cvResult = this.detectEyesAdvancedCV(imgData, width, height, { strict: true });
+
+    // Require BOTH eyes — a bed sheet / wall must not produce a reading
+    if (!cvResult.leftEye || !cvResult.rightEye) {
       return { photo: null, metrics: this.emptyResult() };
     }
 
     const redReflex = this.computeRedChannelRatio(imgData, cvResult.leftEye, cvResult.rightEye);
 
-    const avgPupilRadius = cvResult.leftEye && cvResult.rightEye
-      ? (cvResult.leftEye.radius + cvResult.rightEye.radius) / 2
-      : (cvResult.leftEye?.radius || cvResult.rightEye?.radius || 12);
+    // IPD-based pupil mm (no MediaPipe iris landmarks on static images)
+    const ipdPx = Math.sqrt(
+      Math.pow(cvResult.leftEye.x - cvResult.rightEye.x, 2) +
+      Math.pow(cvResult.leftEye.y - cvResult.rightEye.y, 2),
+    );
+    const pixelsPerMm = ipdPx / 63.0;
+    const avgPupilRadiusPx = (cvResult.leftEye.radius + cvResult.rightEye.radius) / 2;
+    const estimatedPupilMm = Math.max(2.0, Math.min(8.0, (avgPupilRadiusPx / Math.max(0.01, pixelsPerMm)) * 2));
 
-    const estimatedCrescent = Math.min(0.5, Math.max(0.1, 0.2 + (12 - avgPupilRadius) * 0.03));
-    const estimatedPupilMm = Math.max(2.0, Math.min(8.0, avgPupilRadius * 0.3));
+    const crescentEst = estimateCrescentFromPupilRegion(imgData, cvResult.leftEye, cvResult.rightEye);
 
     const metrics: PupilFrameResult = {
       detected: true,
@@ -1137,7 +1337,9 @@ export class EyeTrackerEngine {
       rightEye: cvResult.rightEye,
       pupilDiameterMm: Math.round(estimatedPupilMm * 10) / 10,
       redReflexIntensity: Math.round(redReflex * 100) / 100,
-      crescentRatio: Math.round(estimatedCrescent * 100) / 100,
+      crescentRatio: crescentEst.crescentRatio,
+      crescentOrientation: crescentEst.orientation,
+      pupilMmFromIrisRuler: false,
       fps: 0,
       confidenceScore: cvResult.confidence,
       ear: 0.26,
@@ -1145,13 +1347,12 @@ export class EyeTrackerEngine {
       isObscured: false,
     };
 
-    const orientation: 'TOP' | 'BOTTOM' | 'SYMMETRIC' = estimatedCrescent > 0.25 ? 'TOP' : 'SYMMETRIC';
-
     const photo: PhotorefractionData = {
       pupilDiameterMm: metrics.pupilDiameterMm,
       redReflexIntensityRatio: metrics.redReflexIntensity,
       crescentHeightRatio: metrics.crescentRatio,
-      crescentOrientation: orientation,
+      crescentOrientation: crescentEst.orientation,
+      // Placeholders: Step4 recalculates these with calculatePhotorefraction.
       sphericalEquivalentDiopters: 0,
       astigmatismCylinderDiopters: -0.5,
       classification: 'EMMETROPIA',
@@ -1160,6 +1361,85 @@ export class EyeTrackerEngine {
 
     return { photo, metrics };
   }
+}
+
+/**
+ * Estimates crescent height ratio and orientation from the red-reflex brightness
+ * distribution (bright/dark split) across the detected pupil region.
+ */
+function estimateCrescentFromPupilRegion(
+  imgData: ImageData,
+  leftPupil: { x: number; y: number; radius: number } | null,
+  rightPupil: { x: number; y: number; radius: number } | null,
+): { crescentRatio: number; orientation: 'TOP' | 'BOTTOM' | 'SYMMETRIC' } {
+  const pupils = [leftPupil, rightPupil].filter(Boolean) as { x: number; y: number; radius: number }[];
+  if (pupils.length === 0) {
+    return { crescentRatio: 0.28, orientation: 'TOP' };
+  }
+
+  const data = imgData.data;
+  const w = imgData.width;
+  const h = imgData.height;
+
+  let topBright = 0;
+  let topCount = 0;
+  let bottomBright = 0;
+  let bottomCount = 0;
+  let midBright = 0;
+  let midCount = 0;
+
+  for (const pupil of pupils) {
+    const cx = Math.round(pupil.x);
+    const cy = Math.round(pupil.y);
+    const r = Math.max(4, Math.round(pupil.radius * 0.85));
+
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (dx * dx + dy * dy > r * r) continue;
+        const x = cx + dx;
+        const y = cy + dy;
+        if (x < 0 || x >= w || y < 0 || y >= h) continue;
+
+        const idx = (y * w + x) * 4;
+        const lum = 0.5 * data[idx] + 0.25 * data[idx + 1] + 0.25 * data[idx + 2];
+
+        if (dy < -r * 0.25) {
+          topBright += lum;
+          topCount++;
+        } else if (dy > r * 0.25) {
+          bottomBright += lum;
+          bottomCount++;
+        } else {
+          midBright += lum;
+          midCount++;
+        }
+      }
+    }
+  }
+
+  const avgTop = topCount > 0 ? topBright / topCount : 0;
+  const avgBottom = bottomCount > 0 ? bottomBright / bottomCount : 0;
+  const avgMid = midCount > 0 ? midBright / midCount : 128;
+
+  const topDelta = Math.max(0, avgTop - avgMid);
+  const bottomDelta = Math.max(0, avgBottom - avgMid);
+  let orientation: 'TOP' | 'BOTTOM' | 'SYMMETRIC' = 'SYMMETRIC';
+  if (topDelta > bottomDelta * 1.15 && topDelta > 8) {
+    orientation = 'TOP';
+  } else if (bottomDelta > topDelta * 1.15 && bottomDelta > 8) {
+    orientation = 'BOTTOM';
+  }
+
+  const dominantDelta = Math.max(topDelta, bottomDelta);
+  // Use the measured brightness contrast relative to the pupil's centre;
+  // dividing by maxDelta would always be 1 for a non-zero signal.
+  const relativeContrast = dominantDelta / Math.max(1, avgMid);
+  const crescentRatio = Math.min(0.6, Math.max(0.08, relativeContrast * 1.75 + 0.08));
+
+  return {
+    crescentRatio: Math.round(crescentRatio * 100) / 100,
+    orientation,
+  };
 }
 
 /**
@@ -1198,6 +1478,17 @@ function irisRingDiameterPx(
     diameterPx = 2 * Math.sqrt(dx * dx + dy * dy);
   }
   return diameterPx;
+}
+
+/** Creates a small copy of a source ImageData region without another canvas read. */
+function cropImageData(source: ImageData, x: number, y: number, width: number, height: number): ImageData {
+  const crop = new ImageData(width, height);
+  for (let row = 0; row < height; row++) {
+    const sourceStart = ((y + row) * source.width + x) * 4;
+    const targetStart = row * width * 4;
+    crop.data.set(source.data.subarray(sourceStart, sourceStart + width * 4), targetStart);
+  }
+  return crop;
 }
 
 /**
@@ -1520,11 +1811,10 @@ export function computeLaplacianBlurVariance(
 
 /**
  * MediaPipe Native Z-Depth Extraction
- * Kept for reference/diagnostics, but no longer used as the primary distance source:
- * MediaPipe's landmark z is normalized relative to face width, not a calibrated
- * metric depth, so the linear mm mapping below is a rough placeholder. The iris
- * pinhole model (estimateDistancePinholeModel) is used as the primary estimate
- * in EyeTrackerEngine.processFrame instead.
+ * Not currently called anywhere in this file. Kept for reference/future use if a
+ * calibrated per-device Z model becomes available. See
+ * docs/segmentation-model-integration-plan.md for the broader plan on replacing
+ * heuristic measurements with trained models.
  */
 export function extractMediaPipeZDepth(
   noseTipLandmark: { x: number; y: number; z: number }

@@ -16,11 +16,12 @@ import {
 } from 'lucide-react';
 import { calculatePhotorefraction, calculateEyePhotorefraction, calculateAnisometropia } from '../utils/opticsEngine';
 import { BLINK_EAR_THRESHOLD } from '../utils/eyeTracker';
-import type { PhotorefractionData } from '../types';
+import type { PatientProfile, PhotorefractionData } from '../types';
 import { EyeTrackerEngine, PupilFrameResult } from '../utils/eyeTracker';
 import { QualityPanel } from './QualityIndicator';
 
 interface Step4PhotorefractionScanProps {
+  patient: PatientProfile;
   photorefraction: PhotorefractionData;
   onSave: (data: PhotorefractionData) => void;
   onNext: () => void;
@@ -38,10 +39,8 @@ const MIN_STABLE_FRAMES_REQUIRED = 30;
 const MIN_CONFIDENCE_TO_PROCEED = 70;
 const MIN_BLUR_VARIANCE_TO_PROCEED = 50;
 const MIN_DETECTION_CONFIDENCE_TO_TRUST_EYE = 50;
-const MIN_TRUSTED_WORKING_DISTANCE_CM = 20;
 
 const OPTICAL_CONSTANT_K = 6.0; // published coaxial-flash Howland constant
-const DEFAULT_REFLEX_RATIO = 0.88;
 
 const PUPIL_RENDER_PX_PER_MM = 22; // simulated pupil circle sizing
 
@@ -106,6 +105,7 @@ function isAutoCaptureReady(result: PupilFrameResult): boolean {
 }
 
 export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> = ({
+  patient,
   photorefraction,
   onSave,
   onNext,
@@ -120,6 +120,8 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
   const [pupilDiameter, setPupilDiameter] = useState(photorefraction.pupilDiameterMm || 5.8);
 
   // Calibration parameters (Advanced panel)
+  // flashEccentricityMm default 12 = smartphone coaxial-flash estimate.
+  // A laptop screen-flash would be closer to ~6mm (deferred to Limitations doc).
   const [workingDistanceCm, setWorkingDistanceCm] = useState(100);
   const [flashEccentricityMm, setFlashEccentricityMm] = useState(12);
   const [advancedCalibrationOpen, setAdvancedCalibrationOpen] = useState(false);
@@ -153,7 +155,7 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
     leftEye: null,
     rightEye: null,
     pupilDiameterMm: pupilDiameter,
-    redReflexIntensity: DEFAULT_REFLEX_RATIO,
+    redReflexIntensity: 0,
     crescentRatio: crescentRatio,
     fps: 0,
     confidenceScore: 0,
@@ -183,17 +185,15 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
   const updateLiveMetrics = (result: PupilFrameResult) => {
     latestMetricsRef.current = result;
     setLiveMetrics(result);
-    if (result.pupilDiameterMm) {
-      latestPupilDiameterRef.current = result.pupilDiameterMm;
-      setPupilDiameter(result.pupilDiameterMm);
-    }
-    if (result.crescentRatio) {
-      latestCrescentRatioRef.current = result.crescentRatio;
-      setCrescentRatio(result.crescentRatio);
-    }
+    // Keep capture refs in sync; do NOT overwrite manual slider state while camera is live
+    if (result.pupilDiameterMm) latestPupilDiameterRef.current = result.pupilDiameterMm;
+    if (result.crescentRatio) latestCrescentRatioRef.current = result.crescentRatio;
   };
 
-  const eyeTrackerRef = useRef<EyeTrackerEngine>(new EyeTrackerEngine());
+  const eyeTrackerRef = useRef<EyeTrackerEngine | null>(null);
+  if (eyeTrackerRef.current === null) {
+    eyeTrackerRef.current = new EyeTrackerEngine();
+  }
   const animFrameRef = useRef<number | null>(null);
 
   // Cancellation flag for the uploaded-video frame-sampling loop. It's a
@@ -202,34 +202,53 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
   // Every recursive call checks this ref before continuing/touching state.
   const videoProcessingCancelledRef = useRef(false);
 
-  // Eye detection guard - prevents diopter calculation when no eye is present
-  const eyeDetected = isCameraActive && liveMetrics.detected && (liveMetrics.confidenceScore >= MIN_DETECTION_CONFIDENCE_TO_TRUST_EYE);
+  // Eye detection guard — live camera OR uploaded photo with confident CV detection
+  const hasTrustedMeasurement =
+    liveMetrics.detected && liveMetrics.confidenceScore >= MIN_DETECTION_CONFIDENCE_TO_TRUST_EYE;
+  const eyeDetected = (isCameraActive || !!uploadedImage) && hasTrustedMeasurement;
+  const isChild = patient.age < 18;
+  const showDiopterReading = eyeDetected;
 
-  // Determine which values to use: measured (camera on) or manual (camera off)
-  const useMeasuredPupil = isCameraActive && liveMetrics.detected;
-  const useMeasuredDistance = isCameraActive && !!liveMetrics.zDistanceCm && liveMetrics.zDistanceCm > MIN_TRUSTED_WORKING_DISTANCE_CM;
+  // Formula inputs: measured when camera/upload has eyes; manual sliders in calibration mode only
+  const formulaCrescent = eyeDetected ? liveMetrics.crescentRatio : crescentRatio;
+  const formulaPupil = eyeDetected ? liveMetrics.pupilDiameterMm : pupilDiameter;
+  const formulaReflex = liveMetrics.redReflexIntensity;
+  const formulaOrientation: CrescentOrientation = eyeDetected
+    ? (liveMetrics.crescentOrientation ?? orientation)
+    : orientation;
+  const formulaDistance =
+    isCameraActive &&
+    eyeDetected &&
+    !advancedCalibrationOpen &&
+    liveMetrics.zDistanceCm &&
+    liveMetrics.zDistanceConfident
+      ? liveMetrics.zDistanceCm
+      : workingDistanceCm;
 
-  const effectivePupilDiameter = useMeasuredPupil ? liveMetrics.pupilDiameterMm : pupilDiameter;
-  const effectiveWorkingDistance = useMeasuredDistance ? (liveMetrics.zDistanceCm as number) : workingDistanceCm;
-  const effectiveCrescentRatio = useMeasuredPupil && liveMetrics.crescentRatio > 0 ? liveMetrics.crescentRatio : crescentRatio;
-  const effectiveReflexRatio = useMeasuredPupil ? liveMetrics.redReflexIntensity : DEFAULT_REFLEX_RATIO;
+  const equationSign = formulaOrientation === 'TOP' ? -1 : formulaOrientation === 'BOTTOM' ? 1 : 0;
 
   // Calculate optical parameters (memoized to prevent recalculation every frame)
-  const currentPhotoData = useMemo(() => {
-    if (!eyeDetected && isCameraActive) {
-      // Return default/empty data when camera on but no eye detected
-      return calculatePhotorefraction(crescentRatio, orientation, pupilDiameter, 0);
-    }
-    return calculatePhotorefraction(
-      effectiveCrescentRatio,
-      orientation,
-      effectivePupilDiameter,
-      effectiveReflexRatio,
-      effectiveWorkingDistance,
+  const currentPhotoData = useMemo(
+    () =>
+      calculatePhotorefraction(
+        formulaCrescent,
+        formulaOrientation,
+        formulaPupil,
+        formulaReflex,
+        formulaDistance,
+        flashEccentricityMm,
+        OPTICAL_CONSTANT_K,
+      ),
+    [
+      formulaCrescent,
+      formulaOrientation,
+      formulaPupil,
+      formulaReflex,
+      formulaDistance,
       flashEccentricityMm,
-      OPTICAL_CONSTANT_K
-    );
-  }, [effectiveCrescentRatio, orientation, effectivePupilDiameter, effectiveReflexRatio, effectiveWorkingDistance, flashEccentricityMm, eyeDetected, isCameraActive, crescentRatio, pupilDiameter]);
+      eyeDetected,
+    ],
+  );
 
   // Load available camera devices
   useEffect(() => {
@@ -306,10 +325,11 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
 
     const processLoop = () => {
       if (videoRef.current && overlayCanvasRef.current && isCameraActive) {
-        const result = eyeTrackerRef.current.processFrame(
+        const tracker = eyeTrackerRef.current!;
+        const result = tracker.processFrame(
           videoRef.current,
           overlayCanvasRef.current,
-          { drawMesh: true, flashActive: flashEffect }
+          { drawMesh: true, flashActive: flashEffect, isChild }
         );
         updateLiveMetrics(result);
 
@@ -359,7 +379,7 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isCameraActive, flashEffect, canProceed]);
+  }, [isCameraActive, flashEffect, canProceed, isChild]);
 
   // Unmount cleanup: stop camera and cancel any in-flight uploaded-video
   // frame-sampling loop, so its setTimeout chain can't call setState after
@@ -400,14 +420,14 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
         crescentRatio: metrics.rightEye?.crescentRatio || fallbackCrescentRatio,
         orientation: metrics.rightEye?.crescentOrientation || orientation,
         pupilDiameterMm: metrics.rightEye?.pupilDiameterMm || fallbackPupilDiameter,
-        reflexRatio: metrics.rightEye?.redReflexIntensity || metrics.redReflexIntensity || DEFAULT_REFLEX_RATIO,
+        reflexRatio: metrics.rightEye?.redReflexIntensity ?? metrics.redReflexIntensity,
       });
 
       const osData = calculateEyePhotorefraction({
         crescentRatio: metrics.leftEye?.crescentRatio || fallbackCrescentRatio,
         orientation: metrics.leftEye?.crescentOrientation || orientation,
         pupilDiameterMm: metrics.leftEye?.pupilDiameterMm || fallbackPupilDiameter,
-        reflexRatio: metrics.leftEye?.redReflexIntensity || metrics.redReflexIntensity || DEFAULT_REFLEX_RATIO,
+        reflexRatio: metrics.leftEye?.redReflexIntensity ?? metrics.redReflexIntensity,
       });
 
       const anisometropiaResult = calculateAnisometropia(
@@ -490,24 +510,24 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
       setUploadQualityMessage(quality.message);
 
       if (quality.isAcceptable) {
-        const { photo, metrics } = eyeTrackerRef.current.processImage(img);
+        const tracker = eyeTrackerRef.current!;
+        const { photo, metrics } = tracker.processImage(img, isChild);
 
         if (photo && metrics.detected) {
           setUploadedImage(imageSrc);
-          setPupilDiameter(metrics.pupilDiameterMm);
-          setCrescentRatio(metrics.crescentRatio);
-          setOrientation(photo.crescentOrientation);
-          latestPupilDiameterRef.current = metrics.pupilDiameterMm;
-          latestCrescentRatioRef.current = metrics.crescentRatio;
+          updateLiveMetrics(metrics);
+          if (metrics.crescentOrientation) {
+            setOrientation(metrics.crescentOrientation);
+          }
 
           const calculatedPhoto = calculatePhotorefraction(
-            photo.crescentHeightRatio,
-            photo.crescentOrientation,
-            photo.pupilDiameterMm,
-            photo.redReflexIntensityRatio,
+            metrics.crescentRatio,
+            metrics.crescentOrientation ?? photo.crescentOrientation,
+            metrics.pupilDiameterMm,
+            metrics.redReflexIntensity,
             workingDistanceCm,
             flashEccentricityMm,
-            OPTICAL_CONSTANT_K
+            OPTICAL_CONSTANT_K,
           );
 
           onSave(calculatedPhoto);
@@ -579,10 +599,11 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
         if (videoProcessingCancelledRef.current) return;
 
         if (overlayCanvasRef.current) {
-          const result = eyeTrackerRef.current.processFrame(
+          const tracker = eyeTrackerRef.current!;
+          const result = tracker.processFrame(
             previewVideo,
             overlayCanvasRef.current,
-            { drawMesh: true, flashActive: false }
+            { drawMesh: true, flashActive: false, isChild }
           );
           updateLiveMetrics(result);
         }
@@ -865,7 +886,10 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
               <div>
-                <label className="text-slate-400 block mb-1">Crescent Height Ratio</label>
+                <label className={`block mb-1 ${isCameraActive ? 'text-slate-600' : 'text-slate-400'}`}>
+                  Crescent Height Ratio
+                  {isCameraActive && <span className="text-slate-600 ml-1">(auto when camera on)</span>}
+                </label>
                 <input
                   type="range"
                   min={0}
@@ -873,16 +897,21 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
                   step={0.02}
                   value={crescentRatio}
                   onChange={(e) => setCrescentRatio(parseFloat(e.target.value))}
-                  className="w-full accent-blue-500 cursor-pointer"
+                  disabled={isCameraActive}
+                  className={`w-full accent-blue-500 ${isCameraActive ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
                 />
               </div>
 
               <div>
-                <label className="text-slate-400 block mb-1">Reflex Crescent Pattern</label>
+                <label className={`block mb-1 ${isCameraActive ? 'text-slate-600' : 'text-slate-400'}`}>
+                  Reflex Crescent Pattern
+                  {isCameraActive && <span className="text-slate-600 ml-1">(auto when camera on)</span>}
+                </label>
                 <select
                   value={orientation}
                   onChange={(e) => setOrientation(e.target.value as CrescentOrientation)}
-                  className="w-full bg-slate-900 border border-slate-700 text-white rounded-lg p-1.5 text-xs"
+                  disabled={isCameraActive}
+                  className={`w-full bg-slate-900 border border-slate-700 text-white rounded-lg p-1.5 text-xs ${isCameraActive ? 'opacity-40 cursor-not-allowed' : ''}`}
                 >
                   <option value="TOP">Top Crescent (Myopia)</option>
                   <option value="BOTTOM">Bottom Crescent (Hyperopia)</option>
@@ -1033,6 +1062,25 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
               <span>Extracted Photorefraction Metrics</span>
             </h3>
 
+            {/* Live Equation Box — primary trust element, always visible */}
+            <div className="bg-slate-900 text-cyan-300 p-4 rounded-2xl border border-slate-700 space-y-2">
+              <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-2">
+                Howland Equation (Live)
+              </div>
+              <code className="text-xs font-mono block leading-relaxed">
+                {showDiopterReading ? (
+                  <>SE = {equationSign} · {OPTICAL_CONSTANT_K.toFixed(1)} · ({formulaCrescent.toFixed(2)} · {formulaDistance.toFixed(0)}) / ({flashEccentricityMm.toFixed(0)} · {formulaPupil.toFixed(1)}) = {currentPhotoData.sphericalEquivalentDiopters > 0 ? '+' : ''}{currentPhotoData.sphericalEquivalentDiopters.toFixed(2)} D</>
+                ) : (
+                  'Waiting for a trusted eye measurement.'
+                )}
+              </code>
+              {isCameraActive && eyeDetected && liveMetrics.zDistanceCm && !advancedCalibrationOpen && (
+                <div className="text-[10px] text-slate-500 font-mono">
+                  Distance: {Math.round(liveMetrics.zDistanceCm)} cm (measured) · Pupil: {formulaPupil.toFixed(1)} mm {liveMetrics.pupilMmFromIrisRuler ? '(iris ruler)' : '(IPD estimate)'}
+                </div>
+              )}
+            </div>
+
             {/* Diopters Card */}
             <div className="bg-gradient-to-br from-blue-900 via-slate-900 to-indigo-950 text-white p-6 rounded-3xl shadow-lg space-y-3">
               <div className="flex justify-between items-center text-xs text-blue-200">
@@ -1042,8 +1090,8 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
                 </span>
               </div>
 
-              <div className={`text-4xl font-extrabold font-display tracking-tight ${eyeDetected ? 'text-white' : 'text-slate-500'}`}>
-                {eyeDetected ? (
+              <div className={`text-4xl font-extrabold font-display tracking-tight ${showDiopterReading ? 'text-white' : 'text-slate-500'}`}>
+                {showDiopterReading ? (
                   <>
                     {currentPhotoData.sphericalEquivalentDiopters > 0 ? '+' : ''}
                     {currentPhotoData.sphericalEquivalentDiopters.toFixed(2)} D
@@ -1053,7 +1101,7 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
                 )}
               </div>
 
-              {!eyeDetected && (
+              {!showDiopterReading && (
                 <div className="text-xs text-slate-400 italic mt-1">
                   Position your eye in frame
                 </div>
@@ -1065,14 +1113,6 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
                   {currentPhotoData.classification.replace('_', ' ')}
                 </span>
               </div>
-            </div>
-
-            {/* Live Equation Box */}
-            <div className="bg-slate-900 text-cyan-300 p-4 rounded-2xl border border-slate-700 space-y-2">
-              <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-2">Howland Equation (Live)</div>
-              <code className="text-xs font-mono block leading-relaxed">
-                SE = {orientation === 'TOP' ? '-1' : orientation === 'BOTTOM' ? '+1' : '0'} · {OPTICAL_CONSTANT_K.toFixed(1)} · ({effectiveCrescentRatio.toFixed(2)} · {effectiveWorkingDistance.toFixed(0)}) / ({flashEccentricityMm.toFixed(0)} · {effectivePupilDiameter.toFixed(1)}) = {currentPhotoData.sphericalEquivalentDiopters > 0 ? '+' : ''}{currentPhotoData.sphericalEquivalentDiopters.toFixed(2)} D
-              </code>
             </div>
 
             {/* Metrics Grid */}

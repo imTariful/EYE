@@ -7,7 +7,8 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
+const HOST = process.env.HOST || 'localhost';
 
 app.use(express.json({ limit: '10mb' }));
 
@@ -105,7 +106,10 @@ Rules:
     ];
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash-exp', // Preview model - fallback to 'gemini-2.0-flash' if unavailable
+      // Migrated from Google's retired experimental Gemini 2.0 Flash model (shut down
+      // June 1, 2026, per its deprecations page). For high volume, gemini-2.5-flash-lite
+      // is cheaper but has somewhat lower reasoning quality.
+      model: 'gemini-2.5-flash',
       contents,
       config: {
         systemInstruction,
@@ -216,7 +220,10 @@ Please format the summary in 5 markdown sections:
 MANDATORY: You MUST include the text "Medical Disclaimer: OcuRisk is an AI screening tool, not a diagnostic device. Please consult a licensed eye care professional." at the bottom.`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash-exp', // Preview model - fallback to 'gemini-2.0-flash' if unavailable
+      // Migrated from Google's retired experimental Gemini 2.0 Flash model (shut down
+      // June 1, 2026, per its deprecations page). For high volume, gemini-2.5-flash-lite
+      // is cheaper but has somewhat lower reasoning quality.
+      model: 'gemini-2.5-flash',
       contents: prompt,
       config: {
         systemInstruction: 'You are an expert ophthalmic AI clinical writer producing structured, high-clarity patient health reports.',
@@ -301,9 +308,25 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`OcuRisk Full-Stack Server running on http://0.0.0.0:${PORT}`);
-  });
+  const listen = (port: number, retried = false) => {
+    const server = app.listen(port, HOST, () => {
+      console.log(`OcuRisk Full-Stack Server running on http://localhost:${port} (bound to ${HOST}:${port})`);
+    });
+
+    server.once('error', (error: NodeJS.ErrnoException) => {
+      if (error.code === 'EADDRINUSE' && !retried) {
+        const fallbackPort = port + 1;
+        console.warn(`Port ${port} is already in use; retrying on http://localhost:${fallbackPort}`);
+        listen(fallbackPort, true);
+        return;
+      }
+
+      console.error(`OcuRisk server could not start on ${HOST}:${port}: ${error.message}`);
+      process.exit(1);
+    });
+  };
+
+  listen(PORT);
 }
 
 startServer();

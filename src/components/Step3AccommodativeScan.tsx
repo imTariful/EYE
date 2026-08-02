@@ -130,7 +130,10 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
     confidenceScore: 0,
   });
 
-  const eyeTrackerRef = useRef<EyeTrackerEngine>(new EyeTrackerEngine());
+  const eyeTrackerRef = useRef<EyeTrackerEngine | null>(null);
+  if (eyeTrackerRef.current === null) {
+    eyeTrackerRef.current = new EyeTrackerEngine();
+  }
   const animFrameRef = useRef<number | null>(null);
 
   // Temporary local scan state
@@ -262,7 +265,8 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
 
     const processLoop = () => {
       if (videoRef.current && overlayCanvasRef.current && isCameraActive) {
-        const result = eyeTrackerRef.current.processFrame(
+        const tracker = eyeTrackerRef.current!;
+        const result = tracker.processFrame(
           videoRef.current,
           overlayCanvasRef.current,
           { drawMesh: true }

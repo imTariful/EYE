@@ -34,6 +34,8 @@ const LEUKOCORIA_REFLEX_BOUNDS = { UPPER: 0.88, LOWER: 0.35 } as const;
 
 /** Anisometropia / amblyopia risk thresholds (Diopters) */
 const ANISOMETROPIA_THRESHOLDS = { HIGH: 2.0, MODERATE: 0.75 } as const;
+// This pediatric amblyopia-risk threshold intentionally differs from the 2.0D
+// general anisometropia threshold above, reflecting AAPOS photoscreening guidance.
 const ARF_THRESHOLDS = { HIGH: 1.25, MODERATE: 0.75 } as const;
 
 /** Li et al. 2024 12-month progression regression coefficients */
