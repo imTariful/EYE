@@ -18,6 +18,13 @@ interface Step2QuestionnaireProps {
   onBack: () => void;
 }
 
+type AcuityDirection = '↑' | '↓' | '←' | '→';
+
+function randomAcuityDirection(): AcuityDirection {
+  const directions: AcuityDirection[] = ['↑', '↓', '←', '→'];
+  return directions[Math.floor(Math.random() * directions.length)];
+}
+
 export const Step2Questionnaire: React.FC<Step2QuestionnaireProps> = ({
   patient,
   onChange,
@@ -25,7 +32,9 @@ export const Step2Questionnaire: React.FC<Step2QuestionnaireProps> = ({
   onBack,
 }) => {
   const [acuityLine, setAcuityLine] = React.useState(0);
-  const [acuityDirection, setAcuityDirection] = React.useState<'↑' | '↓' | '←' | '→' | null>(null);
+  // Generate the E orientation once per displayed line. It must not change
+  // merely because another questionnaire control caused a re-render.
+  const [acuityDirection, setAcuityDirection] = React.useState<AcuityDirection>(() => randomAcuityDirection());
 
   const handleSymptomToggle = (key: keyof PatientProfile['symptoms']) => {
     onChange({
@@ -37,7 +46,7 @@ export const Step2Questionnaire: React.FC<Step2QuestionnaireProps> = ({
     });
   };
 
-  const handleAcuityResponse = (direction: '↑' | '↓' | '←' | '→') => {
+  const handleAcuityResponse = (direction: AcuityDirection) => {
     const snellenValues = ['20', '25', '30', '40', '50', '60', '70', '80', '100', '200'];
     const logMARValues = [0.0, 0.1, 0.18, 0.3, 0.4, 0.48, 0.54, 0.6, 0.7, 1.0];
     
@@ -45,7 +54,7 @@ export const Step2Questionnaire: React.FC<Step2QuestionnaireProps> = ({
       // Correct answer - move to next line
       if (acuityLine < snellenValues.length - 1) {
         setAcuityLine(acuityLine + 1);
-        setAcuityDirection(null);
+        setAcuityDirection(randomAcuityDirection());
       } else {
         // Completed all lines successfully
         onChange({
@@ -57,7 +66,7 @@ export const Step2Questionnaire: React.FC<Step2QuestionnaireProps> = ({
           },
         });
         setAcuityLine(0);
-        setAcuityDirection(null);
+        setAcuityDirection(randomAcuityDirection());
       }
     } else {
       // Incorrect answer - record current line as acuity
@@ -71,16 +80,11 @@ export const Step2Questionnaire: React.FC<Step2QuestionnaireProps> = ({
         },
       });
       setAcuityLine(0);
-      setAcuityDirection(null);
+      setAcuityDirection(randomAcuityDirection());
     }
   };
 
-  const generateEDirection = () => {
-    const directions = ['↑', '↓', '←', '→'];
-    return directions[Math.floor(Math.random() * directions.length)] as '↑' | '↓' | '←' | '→';
-  };
-
-  const currentEDirection = acuityDirection || generateEDirection();
+  const currentEDirection = acuityDirection;
 
   return (
     <div className="max-w-4xl mx-auto space-y-8 animate-in fade-in duration-300">
@@ -329,6 +333,8 @@ export const Step2Questionnaire: React.FC<Step2QuestionnaireProps> = ({
                       ...patient,
                       visualAcuity: undefined,
                     });
+                    setAcuityLine(0);
+                    setAcuityDirection(randomAcuityDirection());
                   }}
                   className="text-xs text-purple-600 hover:text-purple-800 underline cursor-pointer"
                 >

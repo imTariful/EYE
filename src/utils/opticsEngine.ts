@@ -493,6 +493,24 @@ export function calculateMultiModalRisk(
   if (photo.sphericalEquivalentDiopters <= -3.0) priorRiskPoints += 20;
   else if (photo.sphericalEquivalentDiopters <= -0.5) priorRiskPoints += 12;
 
+  // Patient-reported symptoms add a small prior-risk contribution. These are
+  // screening signals only and do not constitute a clinical diagnosis.
+  if (patient.symptoms.distanceBlur) priorRiskPoints += 3;
+  if (patient.symptoms.squintingToSee) priorRiskPoints += 3;
+  if (patient.symptoms.eyeStrain) priorRiskPoints += 2;
+  if (patient.symptoms.frequentHeadaches) priorRiskPoints += 1;
+  if (patient.symptoms.dryEyes) priorRiskPoints += 1;
+
+  if (patient.visualAcuity?.tested) {
+    // logMAR also enables subjective/objective calibration (k_cal = k * D_subj/D_obj)
+    // as a future refinement - prior contribution only.
+    priorRiskPoints += Math.min(15, Math.round(patient.visualAcuity.logMAR * 25));
+  }
+
+  const demandD = 100 / Math.max(1, patient.readingDistanceCm);
+  if (patient.readingDistanceCm <= 20) priorRiskPoints += 6;
+  else if (patient.readingDistanceCm <= 30) priorRiskPoints += 3;
+
   const priorScorePercent = Math.max(5, Math.min(95, priorRiskPoints));
 
   // 2. Compute Likelihood Updates from Physical Scans
@@ -567,6 +585,29 @@ export function calculateMultiModalRisk(
       category: 'BEHAVIORAL',
     },
     {
+      feature: 'Reported Symptoms',
+      impactScore: Object.values(patient.symptoms).filter(Boolean).length,
+      description: (() => {
+        const symptoms = [
+          patient.symptoms.distanceBlur && 'distance blur',
+          patient.symptoms.squintingToSee && 'squinting',
+          patient.symptoms.eyeStrain && 'eye strain',
+          patient.symptoms.frequentHeadaches && 'headaches',
+          patient.symptoms.dryEyes && 'dry eyes',
+        ].filter((symptom): symptom is string => Boolean(symptom));
+        return symptoms.length > 0
+          ? `${symptoms.length} of 5 risk-correlated symptoms reported (${symptoms.join(', ')}).`
+          : 'No risk-correlated symptoms reported.';
+      })(),
+      category: 'BEHAVIORAL',
+    },
+    {
+      feature: 'Reading Distance / Accommodative Demand',
+      impactScore: patient.readingDistanceCm <= 20 ? 6 : patient.readingDistanceCm <= 30 ? 3 : 0,
+      description: `Reading at ${patient.readingDistanceCm}cm implies ${demandD.toFixed(1)}D accommodative demand (Donders); sustained near demand >3.3D is a known myopia progression driver.`,
+      category: 'BEHAVIORAL',
+    },
+    {
       feature: 'Photorefraction Diopters',
       impactScore: Math.abs(photo.sphericalEquivalentDiopters) * 2.5,
       description: `Baseline refraction measured at ${photo.sphericalEquivalentDiopters} D (${photo.classification.replace('_', ' ')}).`,
@@ -622,9 +663,19 @@ export function calculateMultiModalRisk(
     const ageFactor = getAgeDecayFactor(year);
     const effectiveRate = baseAnnualProgressionRate * ageFactor;
 
-    currentEstimated = Math.round((currentEstimated - effectiveRate) * 100) / 100;
-    currentHighRisk = Math.round((currentHighRisk - effectiveRate * 1.4) * 100) / 100;
-    currentLowRisk = Math.round((currentLowRisk - effectiveRate * 0.4) * 100) / 100;
+    const step = (value: number, multiplier: number): number => {
+      if (value > 0) {
+        // Hyperope: gentle emmetropisation, drift toward 0, never past it.
+        const drift = effectiveRate * multiplier * 0.5;
+        return Math.round(Math.max(0, value - drift) * 100) / 100;
+      }
+      // Myope (or already at 0): existing behavior, unchanged.
+      return Math.round((value - effectiveRate * multiplier) * 100) / 100;
+    };
+
+    currentEstimated = step(currentEstimated, 1.0);
+    currentHighRisk = step(currentHighRisk, 1.4);
+    currentLowRisk = step(currentLowRisk, 0.4);
 
     trajectory.push({
       year,
@@ -917,6 +968,12 @@ export function predictMyopiaProgressionLi2024(
     LI2024_COEFFICIENTS.geneticLoad * geneticLoad +
     LI2024_COEFFICIENTS.screenFactor * screenFactor +
     LI2024_COEFFICIENTS.outdoorFactor * outdoorFactor;
+
+  // COMET (Collaborative Longitudinal Evaluation of Ethnicity and Refractive Error):
+  // young females progress approximately 15% faster in this prototype estimate.
+  if (patient.age <= 12 && patient.gender === 'FEMALE') {
+    predictedChange12M *= 1.15;
+  }
 
   if (baseSE <= 0) {
     predictedChange12M = Math.min(-0.10, Math.max(-2.25, predictedChange12M));

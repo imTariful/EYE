@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { AccommodativeData, MicrosaccadeData, FixationPoint } from '../types';
-import { calculateBCEA } from '../utils/opticsEngine';
+import { analyzeHighFrequencyMicroFluctuations, calculateBCEA } from '../utils/opticsEngine';
 import { EyeTrackerEngine, PupilFrameResult } from '../utils/eyeTracker';
 import { QualityPanel } from './QualityIndicator';
 import {
@@ -52,6 +52,8 @@ const NPC_TARGET_START_CM = 35;
 const NPC_TARGET_END_CM = 5;
 const NPC_NORMAL_THRESHOLD_CM = 10.0;
 const ACCOMMODATIVE_LAG_NORMAL_THRESHOLD_D = 0.75;
+const DEFAULT_NPC_CM = 8.0;
+const DEFAULT_ACCOMMODATIVE_LAG_D = 0.75;
 
 const BCEA_CLAMP_MIN = 0.15;
 const BCEA_CLAMP_MAX = 2.5;
@@ -137,8 +139,19 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
   const animFrameRef = useRef<number | null>(null);
 
   // Temporary local scan state
-  const [currentNpc, setCurrentNpc] = useState(accommodative.npcCm || 8.5);
-  const [currentLag, setCurrentLag] = useState(accommodative.accommodativeLagDiopters || 0.95);
+  const [currentNpc, setCurrentNpc] = useState(
+    Number.isFinite(accommodative.npcCm) ? accommodative.npcCm : DEFAULT_NPC_CM,
+  );
+  const [currentLag, setCurrentLag] = useState(
+    Number.isFinite(accommodative.accommodativeLagDiopters)
+      ? accommodative.accommodativeLagDiopters
+      : DEFAULT_ACCOMMODATIVE_LAG_D,
+  );
+  const [currentFatigue, setCurrentFatigue] = useState(
+    Number.isFinite(accommodative.fatigueIndex) && microsaccade.fixationPoints.length > 0
+      ? accommodative.fatigueIndex
+      : 50,
+  );
   const [currentBcea, setCurrentBcea] = useState(microsaccade.bceaDeg2 || 0.75);
 
   // ---------------------------------------------------------------------
@@ -160,8 +173,9 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
   const [odLivePoints, setOdLivePointsState] = useState<FixationPoint[]>([]);
   const [osLivePoints, setOsLivePointsState] = useState<FixationPoint[]>([]);
 
-  // For deriving NPC/lag from real tracked signal instead of Math.random().
-  const closestStableDistanceRef = useRef<number>(NPC_TARGET_START_CM);
+  // The webcam cannot directly measure vergence break (NPC) or accommodation
+  // (lag). These values are explicit user/self-reported inputs, not camera
+  // measurements. Keep them deterministic when no value has been supplied.
   const pupilDiameterHistoryRef = useRef<number[]>([]);
 
   const setLivePointsSynced = (updater: (prev: FixationPoint[]) => FixationPoint[]) => {
@@ -284,13 +298,6 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
             }
             return newCount;
           });
-          // Track pupil diameter while stable -- used later to derive
-          // accommodative lag from real constriction trend rather than
-          // a flat random number.
-          pupilDiameterHistoryRef.current = [
-            ...pupilDiameterHistoryRef.current.slice(-60),
-            result.pupilDiameterMm,
-          ];
         } else {
           setStableFrameCount(0);
           setCanProceed(false);
@@ -315,12 +322,6 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
           const osDy = (result.leftEye.y - frameCenterY) / PIXEL_TO_DEGREE_SCALE;
           setOsLivePoints((prev) => [...prev.slice(-40), { x: osDx, y: osDy }]);
 
-          // If the wearer is still fixating stably at this target distance,
-          // record it as the closest confirmed-stable convergence point so
-          // far. Used to derive NPC at scan end instead of Math.random().
-          if (stable && targetDistanceCm < closestStableDistanceRef.current) {
-            closestStableDistanceRef.current = targetDistanceCm;
-          }
         }
       }
       animFrameRef.current = requestAnimationFrame(processLoop);
@@ -358,7 +359,6 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
     setLivePointsSynced(() => []);
     setOdLivePoints(() => []);
     setOsLivePoints(() => []);
-    closestStableDistanceRef.current = NPC_TARGET_START_CM;
     pupilDiameterHistoryRef.current = [];
 
     // Guard against a second scan being started while one is already
@@ -383,6 +383,16 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
       const span = NPC_TARGET_START_CM - NPC_TARGET_END_CM;
       const dist = Math.max(NPC_TARGET_END_CM, NPC_TARGET_START_CM - (step / SCAN_DURATION_STEPS) * span);
       setTargetDistanceCm(Math.round(dist * 10) / 10);
+
+      // Sample the measurable pupil signal once per scan step. This history is
+      // used only for the fatigue estimate; it is not used to infer NPC or lag.
+      const pupilDiameter = latestMetricsRef.current?.pupilDiameterMm;
+      if (Number.isFinite(pupilDiameter) && latestMetricsRef.current?.detected) {
+        pupilDiameterHistoryRef.current = [
+          ...pupilDiameterHistoryRef.current.slice(-59),
+          pupilDiameter as number,
+        ];
+      }
 
       // Fallback noise points only when camera tracking isn't supplying
       // real points for this tick (camera off, or CV loop hasn't caught up).
@@ -414,45 +424,26 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
         const odBcea = clampBcea(odBceaCalc.bceaDeg2, finalBcea);
         const osBcea = clampBcea(osBceaCalc.bceaDeg2, finalBcea);
 
-        // --- Derive NPC from the tracked scan, not a random number ---
-        // closestStableDistanceRef holds the nearest target distance at
-        // which the tracker still confirmed a stable, non-blinking,
-        // in-frame fixation. That's a reasonable proxy for near point of
-        // convergence: closer than this and the CV pipeline lost stable
-        // tracking (approximating the eyes losing convergence/binocularity).
-        // Camera-off fallback keeps the previous simulated behavior so the
-        // scan is still usable without a webcam.
-        const finalNpc = isCameraActive
-          ? Math.round(closestStableDistanceRef.current * 10) / 10
-          : Math.round((6.0 + Math.random() * 4.0) * 10) / 10;
+        // NPC and accommodative lag are not directly measurable from this
+        // webcam workflow. Preserve the deterministic values entered by the
+        // user instead of presenting a camera-derived or random estimate.
+        const finalNpc = Number.isFinite(currentNpc) ? currentNpc : DEFAULT_NPC_CM;
+        const finalLag = Number.isFinite(currentLag) ? currentLag : DEFAULT_ACCOMMODATIVE_LAG_D;
 
-        // --- Derive accommodative lag from pupil diameter trend ---
-        // As targets get nearer, a healthy accommodative response shows
-        // measurable pupil constriction. Less constriction over the scan
-        // suggests more lag. This is a simplified proxy, not a clinical
-        // measurement, but it's tied to tracked signal instead of being
-        // pure noise. Falls back to a fixed baseline off-camera.
-        let finalLag: number;
-        if (isCameraActive && pupilDiameterHistoryRef.current.length >= 10) {
-          const history = pupilDiameterHistoryRef.current;
-          const firstThird = history.slice(0, Math.floor(history.length / 3));
-          const lastThird = history.slice(-Math.floor(history.length / 3));
-          const avgFirst = firstThird.reduce((a, b) => a + b, 0) / firstThird.length;
-          const avgLast = lastThird.reduce((a, b) => a + b, 0) / lastThird.length;
-          const constrictionMm = Math.max(0, avgFirst - avgLast);
-          // More constriction -> lower lag. Scaled/clamped to a plausible
-          // clinical range (~0.25D to ~1.5D) pending real validation data.
-          finalLag = Math.max(0.25, Math.min(1.5, 1.4 - constrictionMm * 1.2));
-          finalLag = Math.round(finalLag * 100) / 100;
-        } else {
-          finalLag = Math.round((0.5 + Math.random() * 0.8) * 100) / 100;
-        }
-
-        const fatigueIndex = Math.round(45 + Math.random() * 35);
+        const fatigueAnalysis = analyzeHighFrequencyMicroFluctuations(
+          pupilDiameterHistoryRef.current,
+          30,
+        );
+        // A short/insufficient pupil history cannot support an HFF estimate;
+        // use a neutral value rather than inventing a measurement.
+        const fatigueIndex = pupilDiameterHistoryRef.current.length >= 10
+          ? fatigueAnalysis.fatigueIndex
+          : 50;
 
         setCurrentBcea(finalBcea);
         setCurrentNpc(finalNpc);
         setCurrentLag(finalLag);
+        setCurrentFatigue(fatigueIndex);
 
         const updatedAccomm: AccommodativeData = {
           ...accommodative,
@@ -508,19 +499,36 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
 
   const framesRemainingForStability = Math.max(0, MIN_STABLE_FRAMES_REQUIRED - stableFrameCount);
 
+  const saveManualMetrics = () => {
+    onSave(
+      {
+        ...accommodative,
+        npcCm: currentNpc,
+        accommodativeLagDiopters: currentLag,
+        od: accommodative.od
+          ? { ...accommodative.od, npcCm: currentNpc, accommodativeLagDiopters: currentLag }
+          : undefined,
+        os: accommodative.os
+          ? { ...accommodative.os, npcCm: currentNpc, accommodativeLagDiopters: currentLag }
+          : undefined,
+      },
+      microsaccade,
+    );
+  };
+
   return (
     <div className="max-w-5xl mx-auto space-y-8 animate-in fade-in duration-300">
       {/* Header */}
       <div className="bg-white p-6 sm:p-8 rounded-3xl border border-slate-200/80 shadow-xs space-y-2">
         <div className="flex items-center space-x-2 text-cyan-600 font-bold text-xs uppercase tracking-wider">
           <Target className="w-4 h-4" />
-          <span>Step 3 of 6 • Live Webcam Accommodative & Fixation Tracking</span>
+          <span>Step 3 of 6 • Live Webcam Pupil & Fixation Tracking</span>
         </div>
         <h2 className="text-2xl font-bold text-slate-900 font-display">
           Real-Time Camera Pupil & Microsaccade BCEA Analyzer
         </h2>
         <p className="text-sm text-slate-600">
-          Uses live camera feed computer vision to track eyes, measure pupil centers, compute near point convergence (NPC), and evaluate fixational stability.
+          Uses live camera computer vision to measure pupil micro-fluctuations and fixational stability. NPC and accommodative lag are entered separately because a standard webcam cannot measure them directly.
         </p>
       </div>
 
@@ -639,7 +647,7 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
               </div>
             )}
 
-            {/* Animated Target Overlay for Convergence Exercise */}
+            {/* Animated target overlay for the fixation exercise */}
             {isScanning && (
               <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
                 <div
@@ -704,12 +712,12 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
             {isScanning ? (
               <>
                 <Activity className="w-4 h-4 animate-spin text-cyan-400" />
-                <span>Tracking Live Pupil & Convergence ({scanProgress}%)...</span>
+                <span>Tracking Live Pupil & Fixation ({scanProgress}%)...</span>
               </>
             ) : (
               <>
                 <Play className="w-4 h-4 fill-current" />
-                <span>{scanCompleted ? 'Re-run Live Camera Scan' : 'Execute Real Camera Convergence Scan'}</span>
+                <span>{scanCompleted ? 'Re-run Live Camera Scan' : 'Execute Camera Pupil & Fixation Scan'}</span>
               </>
             )}
           </button>
@@ -759,20 +767,81 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
             </div>
 
             {/* Extracted Metrics Cards */}
-            <div className="grid grid-cols-2 gap-3 pt-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
               <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200/80">
-                <div className="text-[11px] font-semibold text-slate-500">NPC (Convergence)</div>
-                <div className="text-lg font-bold text-slate-900 mt-0.5">{currentNpc} cm</div>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[11px] font-semibold text-slate-500">NPC (Convergence)</div>
+                  <span
+                    title="A standard webcam cannot directly measure vergence break or near point of convergence. Enter a self-reported value or one measured with a pen/push-up test."
+                    className="inline-flex items-center gap-1 text-[9px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full"
+                  >
+                    <Info className="w-3 h-3" /> Self-reported / not camera-measured
+                  </span>
+                </div>
+                <label className="mt-2 flex items-center gap-2">
+                  <input
+                    type="number"
+                    min="1"
+                    max="40"
+                    step="0.5"
+                    aria-label="Self-reported NPC in centimeters"
+                    value={currentNpc}
+                    onChange={(e) => {
+                      const value = e.target.valueAsNumber;
+                      setCurrentNpc(Number.isFinite(value) && value > 0 ? value : DEFAULT_NPC_CM);
+                    }}
+                    className="w-20 rounded-lg border border-slate-300 bg-white px-2 py-1 text-sm font-bold text-slate-900"
+                  />
+                  <span className="text-xs font-semibold text-slate-500">cm</span>
+                </label>
                 <div className={`text-[10px] font-bold mt-0.5 ${currentNpc <= NPC_NORMAL_THRESHOLD_CM ? 'text-emerald-700' : 'text-amber-700'}`}>
                   {currentNpc <= NPC_NORMAL_THRESHOLD_CM ? `✓ Normal Convergence (≤${NPC_NORMAL_THRESHOLD_CM}cm)` : `⚠️ Insufficiency (>${NPC_NORMAL_THRESHOLD_CM}cm)`}
                 </div>
               </div>
 
               <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200/80">
-                <div className="text-[11px] font-semibold text-slate-500">Accommodative Lag</div>
-                <div className="text-lg font-bold text-slate-900 mt-0.5">+{currentLag.toFixed(2)} D</div>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[11px] font-semibold text-slate-500">Accommodative Lag</div>
+                  <span
+                    title="A standard webcam cannot directly measure accommodative response or lag. Enter a value only when supplied by an eye-care measurement; otherwise keep the neutral default."
+                    className="inline-flex items-center gap-1 text-[9px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full"
+                  >
+                    <Info className="w-3 h-3" /> Self-reported / not camera-measured
+                  </span>
+                </div>
+                <label className="mt-2 flex items-center gap-2">
+                  <input
+                    type="number"
+                    min="0"
+                    max="3"
+                    step="0.05"
+                    aria-label="Self-reported accommodative lag in diopters"
+                    value={currentLag}
+                    onChange={(e) => {
+                      const value = e.target.valueAsNumber;
+                      setCurrentLag(Number.isFinite(value) && value >= 0 ? value : DEFAULT_ACCOMMODATIVE_LAG_D);
+                    }}
+                    className="w-20 rounded-lg border border-slate-300 bg-white px-2 py-1 text-sm font-bold text-slate-900"
+                  />
+                  <span className="text-xs font-semibold text-slate-500">D</span>
+                </label>
                 <div className={`text-[10px] font-bold mt-0.5 ${currentLag <= ACCOMMODATIVE_LAG_NORMAL_THRESHOLD_D ? 'text-emerald-700' : 'text-amber-700'}`}>
                   {currentLag <= ACCOMMODATIVE_LAG_NORMAL_THRESHOLD_D ? `✓ Normal Lag (≤+${ACCOMMODATIVE_LAG_NORMAL_THRESHOLD_D}D)` : `⚠️ Elevated Lag (>+${ACCOMMODATIVE_LAG_NORMAL_THRESHOLD_D}D)`}
+                </div>
+              </div>
+
+              <div className="sm:col-span-2 bg-cyan-50 p-3.5 rounded-2xl border border-cyan-200/80 flex items-center justify-between gap-4">
+                <div>
+                  <div className="text-[11px] font-semibold text-cyan-800">Pupil Micro-Fluctuation Fatigue</div>
+                  <div className="text-[10px] text-cyan-700 mt-0.5">
+                    Camera-derived HFF estimate from pupil-diameter variation during the scan.
+                  </div>
+                </div>
+                <div className="text-right shrink-0">
+                  <div className="text-lg font-bold text-cyan-950">{currentFatigue}/100</div>
+                  <div className="text-[9px] font-semibold text-cyan-700">
+                    {scanCompleted ? 'Measured this scan' : 'Previous / neutral value'}
+                  </div>
                 </div>
               </div>
             </div>
@@ -795,7 +864,10 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
                 </span>
               )}
               <button
-                onClick={onNext}
+                onClick={() => {
+                  saveManualMetrics();
+                  onNext();
+                }}
                 disabled={!canProceed && isCameraActive}
                 className={`inline-flex items-center space-x-2 px-6 py-2.5 rounded-xl font-bold text-xs sm:text-sm shadow-md transition-all cursor-pointer ${
                   canProceed || !isCameraActive
