@@ -82,6 +82,7 @@ export default function App() {
 
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [isDisclaimerOpen, setIsDisclaimerOpen] = useState(false);
+  const [demoMode, setDemoMode] = useState(false);
   const restoringRef = useRef(false);
 
   // Save scan session to history when Step 6 is reached
@@ -114,6 +115,7 @@ export default function App() {
   }, [currentStep]);
 
   const handleResetScan = () => {
+    setDemoMode(false);
     setPatient(DEFAULT_PATIENT);
     setPhotorefraction(calculatePhotorefraction(0.28, 'TOP', 5.8, 0.88));
     setAccommodative(DEFAULT_ACCOMMODATIVE);
@@ -122,8 +124,21 @@ export default function App() {
     setCurrentStep(1);
   };
 
+  const handleLoadDemo = () => {
+    const photo = calculatePhotorefraction(0.28, 'TOP', 5.5, 0.85);
+    setDemoMode(true);
+    setPatient(DEFAULT_PATIENT);
+    setPhotorefraction(photo);
+    setAccommodative(DEFAULT_ACCOMMODATIVE);
+    setMicrosaccade(DEFAULT_MICROSACCADE);
+    setRiskResult(calculateMultiModalRisk(DEFAULT_PATIENT, photo, DEFAULT_ACCOMMODATIVE, DEFAULT_MICROSACCADE));
+    setCompletedSteps(new Set([1, 2, 3, 4, 5, 6]));
+    setCurrentStep(6);
+  };
+
   const handleSelectSession = (session: ScanSession) => {
     restoringRef.current = true;
+    setDemoMode(session.demoMode ?? false);
     setPatient(session.patient);
     setPhotorefraction(session.photorefraction);
     setAccommodative(session.accommodative);
@@ -146,6 +161,7 @@ export default function App() {
     accommodative,
     microsaccade,
     riskResult,
+    demoMode,
   };
 
   return (
@@ -171,9 +187,11 @@ export default function App() {
           {currentStep === 1 && (
             <Step1Welcome
               onStart={() => {
+                setDemoMode(false);
                 setCompletedSteps((prev) => new Set([...prev, 1, 2]));
                 setCurrentStep(2);
               }}
+              onLoadDemo={handleLoadDemo}
             />
           )}
 

@@ -197,6 +197,34 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
 
   return (
     <div className="space-y-8 animate-in fade-in duration-300 max-w-7xl mx-auto">
+      {session.demoMode && (
+        <div className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <strong>Prepared showcase demo:</strong> These values are deterministic demonstration data, not patient measurements. Use the live workflow for camera-derived estimates.
+        </div>
+      )}
+      <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-xs">
+        <div className="mb-3">
+          <h2 className="text-sm font-bold text-slate-900">How these results were produced</h2>
+          <p className="text-[11px] text-slate-500">Measurement provenance for responsible interpretation.</p>
+        </div>
+        <div className="grid grid-cols-1 gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
+          {[
+            ['Pupil and red reflex', session.demoMode ? 'Prepared demo data' : 'Camera estimate'],
+            ['NPC and accommodative lag', 'Manual / externally measured input'],
+            ['Fixation and BCEA', session.demoMode ? 'Prepared demo data' : 'Camera estimate'],
+            ['Risk index', 'Deterministic prototype fusion'],
+            ['Progression cards', 'Illustrative research reconstruction'],
+            ['AI explanation', 'Optional Gemini request'],
+            ['Images and video', 'Processed locally in the browser'],
+            ['Clinical status', 'Screening prototype - not a diagnosis'],
+          ].map(([label, source]) => (
+            <div key={label} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <div className="font-semibold text-slate-800">{label}</div>
+              <div className="mt-1 text-[11px] text-slate-600">{source}</div>
+            </div>
+          ))}
+        </div>
+      </section>
       {/* Top Banner & Exporter Controls */}
       <div className="bg-white p-6 sm:p-8 rounded-3xl border border-slate-200/80 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>

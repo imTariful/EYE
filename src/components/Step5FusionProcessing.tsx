@@ -73,7 +73,7 @@ export const Step5FusionProcessing: React.FC<Step5FusionProcessingProps> = ({
     },
     {
       title: 'Bayesian Beta Distribution Convergence',
-      desc: 'Posterior probability density computed successfully.',
+      desc: 'Prototype risk-index density computed successfully; this is not a calibrated clinical probability.',
     },
   ];
   const FINAL_STAGE = STAGES.length - 1;

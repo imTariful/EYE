@@ -12,9 +12,10 @@ import {
 
 interface Step1WelcomeProps {
   onStart: () => void;
+  onLoadDemo: () => void;
 }
 
-export const Step1Welcome: React.FC<Step1WelcomeProps> = ({ onStart }) => {
+export const Step1Welcome: React.FC<Step1WelcomeProps> = ({ onStart, onLoadDemo }) => {
   return (
     <div className="space-y-8 animate-in fade-in duration-300">
       {/* Hero Header Banner */}
@@ -45,11 +46,21 @@ export const Step1Welcome: React.FC<Step1WelcomeProps> = ({ onStart }) => {
               <ArrowRight className="w-5 h-5" />
             </button>
 
+            <button
+              onClick={onLoadDemo}
+              className="px-5 py-3.5 rounded-2xl border border-amber-300/40 bg-amber-400/10 hover:bg-amber-400/20 text-amber-100 font-semibold text-sm transition-all cursor-pointer"
+            >
+              Load Prepared Demo Session
+            </button>
+
             <div className="flex items-center space-x-2 text-xs text-slate-400 bg-slate-800/80 px-4 py-3 rounded-2xl border border-slate-700/60">
               <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
               <span>Non-invasive • Local Camera CV • Optional Gemini Features</span>
             </div>
           </div>
+          <p className="relative z-10 mt-4 text-[11px] text-amber-200/90">
+            Prepared demo values are clearly labelled and are not patient measurements.
+          </p>
         </div>
       </div>
 
@@ -117,7 +128,7 @@ export const Step1Welcome: React.FC<Step1WelcomeProps> = ({ onStart }) => {
             </div>
             <h3 className="font-bold text-slate-900 text-base">4. Bayesian Fusion Engine</h3>
             <p className="text-xs text-slate-600 leading-relaxed">
-              Synthesizes physical scans with genetic factors and daily screen/outdoor habits into a 12-month Myopia Progression Probability curve.
+              Synthesizes physical scans with genetic factors and daily screen/outdoor habits into a prototype myopia-risk index and uncertainty curve.
             </p>
             <div className="pt-2 flex items-center text-[11px] font-semibold text-purple-700 space-x-1">
               <Check className="w-3.5 h-3.5" />

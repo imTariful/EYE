@@ -210,6 +210,7 @@ export interface ScanSession {
   microsaccade: MicrosaccadeData;
   riskResult: RiskScoreResult;
   aiNotes?: string;
+  demoMode?: boolean;
 }
 
 export interface ChatMessage {
