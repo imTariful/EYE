@@ -1,5 +1,6 @@
 import React from 'react';
 import { PatientProfile } from '../types';
+import { calculateThibosPowerVectors } from '../utils/opticsEngine';
 import {
   User,
   Clock,
@@ -85,6 +86,29 @@ export const Step2Questionnaire: React.FC<Step2QuestionnaireProps> = ({
   };
 
   const currentEDirection = acuityDirection;
+  const prescription = patient.currentPrescription ?? {
+    sphere: patient.currentDiopters ?? 0,
+    cylinder: 0,
+    axis: 0,
+  };
+
+  const updatePrescription = (field: 'sphere' | 'cylinder' | 'axis', value: number) => {
+    const nextPrescription = {
+      ...prescription,
+      [field]: Number.isFinite(value) ? value : 0,
+    };
+    const powerVectors = calculateThibosPowerVectors(
+      nextPrescription.sphere,
+      nextPrescription.cylinder,
+      nextPrescription.axis,
+    );
+    onChange({
+      ...patient,
+      currentDiopters: nextPrescription.sphere,
+      currentPrescription: nextPrescription,
+      currentPrescriptionPowerVectors: powerVectors,
+    });
+  };
 
   return (
     <div className="max-w-4xl mx-auto space-y-8 animate-in fade-in duration-300">
@@ -264,7 +288,20 @@ export const Step2Questionnaire: React.FC<Step2QuestionnaireProps> = ({
               </label>
               <select
                 value={patient.currentGlasses}
-                onChange={(e) => onChange({ ...patient, currentGlasses: e.target.value as any })}
+                onChange={(e) => {
+                  const currentGlasses = e.target.value as PatientProfile['currentGlasses'];
+                  onChange({
+                    ...patient,
+                    currentGlasses,
+                    ...(currentGlasses === 'NONE'
+                      ? {
+                          currentDiopters: undefined,
+                          currentPrescription: undefined,
+                          currentPrescriptionPowerVectors: undefined,
+                        }
+                      : {}),
+                  });
+                }}
                 className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 text-sm transition-all"
               >
                 <option value="NONE">None (Uncorrected)</option>
@@ -272,6 +309,56 @@ export const Step2Questionnaire: React.FC<Step2QuestionnaireProps> = ({
                 <option value="HYPEROPIA">Glasses for Reading / Hyperopia</option>
               </select>
             </div>
+
+            {patient.currentGlasses !== 'NONE' && (
+              <div className="sm:col-span-2 bg-purple-50 p-4 rounded-2xl border border-purple-200/70 space-y-3">
+                <div>
+                  <div className="text-xs font-semibold text-purple-950">Current Prescription (Optional)</div>
+                  <p className="text-[11px] text-purple-700">
+                    Enter values from an existing prescription. These are self-reported, not camera-measured.
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <label className="text-[11px] font-semibold text-slate-700">
+                    Sphere (D)
+                    <input
+                      type="number"
+                      step="0.25"
+                      value={prescription.sphere}
+                      onChange={(e) => updatePrescription('sphere', e.target.valueAsNumber)}
+                      className="mt-1 w-full px-3 py-2 rounded-xl border border-purple-200 bg-white text-sm"
+                    />
+                  </label>
+                  <label className="text-[11px] font-semibold text-slate-700">
+                    Cylinder (D)
+                    <input
+                      type="number"
+                      step="0.25"
+                      value={prescription.cylinder}
+                      onChange={(e) => updatePrescription('cylinder', e.target.valueAsNumber)}
+                      className="mt-1 w-full px-3 py-2 rounded-xl border border-purple-200 bg-white text-sm"
+                    />
+                  </label>
+                  <label className="text-[11px] font-semibold text-slate-700">
+                    Axis (0-180°)
+                    <input
+                      type="number"
+                      min="0"
+                      max="180"
+                      step="1"
+                      value={prescription.axis}
+                      onChange={(e) => updatePrescription('axis', Math.max(0, Math.min(180, e.target.valueAsNumber)))}
+                      className="mt-1 w-full px-3 py-2 rounded-xl border border-purple-200 bg-white text-sm"
+                    />
+                  </label>
+                </div>
+                <div className="flex flex-wrap gap-2 text-[11px] font-mono text-purple-900">
+                  <span className="px-2 py-1 rounded-lg bg-white border border-purple-200">M: {(patient.currentPrescriptionPowerVectors?.M ?? calculateThibosPowerVectors(prescription.sphere, prescription.cylinder, prescription.axis).M).toFixed(2)} D</span>
+                  <span className="px-2 py-1 rounded-lg bg-white border border-purple-200">J0: {(patient.currentPrescriptionPowerVectors?.J0 ?? calculateThibosPowerVectors(prescription.sphere, prescription.cylinder, prescription.axis).J0).toFixed(2)} D</span>
+                  <span className="px-2 py-1 rounded-lg bg-white border border-purple-200">J45: {(patient.currentPrescriptionPowerVectors?.J45 ?? calculateThibosPowerVectors(prescription.sphere, prescription.cylinder, prescription.axis).J45).toFixed(2)} D</span>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 

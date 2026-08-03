@@ -10,6 +10,16 @@ export interface PatientProfile {
   readingDistanceCm: number;
   currentGlasses: 'NONE' | 'MYOPIA' | 'HYPEROPIA';
   currentDiopters?: number;
+  currentPrescription?: {
+    sphere: number;
+    cylinder: number;
+    axis: number;
+  };
+  currentPrescriptionPowerVectors?: {
+    M: number;
+    J0: number;
+    J45: number;
+  };
   symptoms: {
     eyeStrain: boolean;
     frequentHeadaches: boolean;
@@ -76,6 +86,9 @@ export interface AccommodativeEyeMetrics {
   constrictionVelocityMmSec: number; // Pupil constriction speed
   responseLatencyMs: number;
   accommodativeSlopeShift?: number; // Slope shift during near-target approach
+  cameraNpcProxyCm?: number; // Webcam vergence proxy; does not replace manual/clinical NPC
+  cameraNpcProxyConfidence?: 'LOW' | 'MODERATE';
+  cameraNpcProxyVergenceAngleDeg?: number;
 }
 
 export interface AccommodativeData {
@@ -102,6 +115,7 @@ export interface MicrosaccadeEyeMetrics {
   bceaConfidenceLevel?: number; // 1-sigma (68.27%) or 2-sigma (95.45%)
   fixationStabilityScore: number; // 0 - 100
   microsaccadeFrequencyHz: number;
+  microsaccadeFrequencyConfidence?: 'MEASURED' | 'LOW';
   fixationPoints: FixationPoint[];
   amblyopiaRisk: 'LOW' | 'MODERATE' | 'HIGH';
 }
@@ -113,6 +127,7 @@ export interface MicrosaccadeData {
   bceaConfidenceLevel?: number; // 1-sigma (68.27%) or 2-sigma (95.45%)
   fixationStabilityScore: number; // 0 - 100
   microsaccadeFrequencyHz: number;
+  microsaccadeFrequencyConfidence?: 'MEASURED' | 'LOW';
   fixationPoints: FixationPoint[];
   amblyopiaRisk: 'LOW' | 'MODERATE' | 'HIGH';
   // Individual eye fixation data
@@ -150,15 +165,19 @@ export interface Li2024MyopiaProgression {
   predictedChange12M: number; // 12-month diopter change (e.g. -0.48 D)
   projectedDiopters12M: number; // Projected SE at 12 months
   highMyopiaProbabilityPercent: number; // Probability of progressing to high myopia
-  aucScore: number; // 0.99
-  maeDiopters: number; // 0.119 D
+  aucScore?: number;
+  maeDiopters?: number;
+  illustrativeOnly?: boolean;
+  modelNote?: string;
 }
 
 export interface Foo2023FiveYearHighMyopiaRisk {
   riskPercent5Y: number; // 0-100%
-  aucScore: number; // 0.97
+  aucScore?: number;
   fundusAdapterValidated: boolean;
   riskCategory5Y: 'LOW' | 'MODERATE' | 'HIGH' | 'EXTREME';
+  illustrativeOnly?: boolean;
+  modelNote?: string;
 }
 
 export interface CradleLeukocoriaResult {

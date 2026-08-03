@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ScanSession, ChatMessage } from '../types';
+import { defocusToLogMAR } from '../utils/opticsEngine';
 import {
   LineChart,
   Line,
@@ -48,7 +49,7 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
       sender: 'assistant',
       text: `Hello ${session.patient.patientName}! I am OcuRisk AI, your personal Eye-Health Assistant. I've analyzed your multi-modal photorefraction, accommodative lag (+${session.accommodative.accommodativeLagDiopters.toFixed(
         2
-      )}D), and fixational microsaccade scan. Your estimated 12-month myopia progression risk score is ${session.riskResult.overallRiskPercent}% (${session.riskResult.riskCategory} Risk). How can I help clarify your results today?`,
+      )}D), and fixational microsaccade scan. Your screening risk estimate is ${session.riskResult.overallRiskPercent}% ±${session.riskResult.uncertaintyMargin}% (${session.riskResult.riskCategory}). How can I help clarify your results today?`,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       suggestedQuestions: [
         `What does my ${session.photorefraction.sphericalEquivalentDiopters}D diopter rating mean?`,
@@ -188,6 +189,11 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
     session.photorefraction.anisometropiaRisk ??
     (anisometropiaDelta >= 2.0 ? 'HIGH' : anisometropiaDelta >= 0.75 ? 'MODERATE' : 'LOW');
   const anisometropiaFlagged = anisometropiaRisk === 'MODERATE' || anisometropiaRisk === 'HIGH';
+  const objectiveAcuity = defocusToLogMAR(session.photorefraction.sphericalEquivalentDiopters);
+  const testedAcuity = session.patient.visualAcuity?.tested ? session.patient.visualAcuity : undefined;
+  const acuityLogMarDifference = testedAcuity
+    ? Math.abs(objectiveAcuity.logMAR - testedAcuity.logMAR)
+    : null;
 
   return (
     <div className="space-y-8 animate-in fade-in duration-300 max-w-7xl mx-auto">
@@ -203,6 +209,9 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
           </h1>
           <p className="text-xs sm:text-sm text-slate-600">
             Patient: <span className="font-semibold text-slate-900">{session.patient.patientName}</span> (Age {session.patient.age}) • Scan ID: {session.id}
+          </p>
+          <p className="mt-1 text-sm font-bold text-blue-700">
+            Screening risk estimate: {session.riskResult.overallRiskPercent}% ±{session.riskResult.uncertaintyMargin}%
           </p>
         </div>
 
@@ -348,7 +357,7 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
           {anisometropiaFlagged && (
             <div className="mt-2 p-2 bg-amber-50 rounded-lg border border-amber-200">
               <p className="text-[10px] text-amber-800 font-semibold">
-                ⚠️ Asymmetry detected - Clinical follow-up recommended
+                ⚠️ Inter-eye asymmetry detected — consider follow-up with an eye-care professional.
               </p>
             </div>
           )}
@@ -388,15 +397,16 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
             <BrainCircuit className="w-4 h-4 text-purple-600" />
           </div>
           <div className="text-3xl font-extrabold text-purple-700 font-display flex items-baseline space-x-1.5">
-            <span>{session.riskResult.li2024MyopiaProgression12M?.predictedChange12M ?? -0.48} D</span>
+            <span>{session.riskResult.li2024MyopiaProgression12M?.predictedChange12M ?? 'Unavailable'} D</span>
             <span className="text-xs font-normal text-slate-500">/yr</span>
           </div>
           <div className="inline-block px-2.5 py-1 rounded-lg bg-purple-50 text-purple-800 font-bold text-xs border border-purple-200/60">
-            Li et al. Model (AUC 0.99, MAE 0.119D)
+            Li et al. (2024) — illustrative reconstruction
           </div>
           <p className="text-[11px] text-slate-500">
             Projected 12M SE: <span className="font-bold text-slate-800">{session.riskResult.li2024MyopiaProgression12M?.projectedDiopters12M} D</span>
           </p>
+          <p className="text-[10px] text-amber-700">Prototype coefficients, not the published trained model.</p>
         </div>
 
         <div className="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-xs space-y-3">
@@ -405,14 +415,16 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
             <Target className="w-4 h-4 text-indigo-600" />
           </div>
           <div className="text-3xl font-extrabold text-slate-900 font-display">
-            {session.riskResult.foo2023FiveYearHighMyopiaRisk?.riskPercent5Y ?? 35}%
+            {session.riskResult.foo2023FiveYearHighMyopiaRisk?.riskPercent5Y ?? 'Unavailable'}%
           </div>
           <div className="inline-block px-2.5 py-1 rounded-lg bg-indigo-50 text-indigo-700 font-bold text-xs border border-indigo-200/60">
-            Foo et al. DLS (AUC 0.97)
+            Foo et al. (2023) — illustrative reconstruction
           </div>
           <p className="text-[11px] text-slate-500">
             5-Year Category: <span className="font-bold text-slate-800">{session.riskResult.foo2023FiveYearHighMyopiaRisk?.riskCategory5Y ?? 'MODERATE'}</span>
           </p>
+          <p className="text-[10px] text-slate-600">Fundus adapter: not used</p>
+          <p className="text-[10px] text-amber-700">Prototype coefficients, not the published trained model.</p>
         </div>
 
         <div className="bg-white p-6 rounded-3xl border border-slate-200/80 shadow-xs space-y-3">
@@ -430,11 +442,47 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
                 : 'bg-emerald-50 text-emerald-700 border-emerald-200'
             }`}
           >
-            CRADLE: {session.riskResult.cradleLeukocoria?.isPositive ? 'LEUKOCORIA SUSPECT' : 'NORMAL REFLEX'}
+            CRADLE: {session.riskResult.cradleLeukocoria?.isPositive ? 'ABNORMAL RED REFLEX — recommend professional assessment' : 'NO MULTI-FRAME FLAG'}
           </div>
           <p className="text-[11px] text-slate-500">
-            Kalman Smoothed Fixation (Raw: {session.microsaccade.rawBceaDeg2 ?? session.microsaccade.bceaDeg2} deg²)
+            Savitzky-Golay Smoothed Fixation (Raw: {session.microsaccade.rawBceaDeg2 ?? session.microsaccade.bceaDeg2} deg²)
           </p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="bg-white p-5 rounded-3xl border border-slate-200/80 shadow-xs space-y-2">
+          <h3 className="font-bold text-slate-900 text-sm">Objective-vs-subjective consistency check</h3>
+          <p className="text-[11px] text-slate-500">Screening heuristic only; defocus does not fully predict visual acuity.</p>
+          <div className="grid grid-cols-2 gap-3 text-xs">
+            <div className="rounded-xl bg-blue-50 p-3 border border-blue-100">
+              <div className="text-slate-500">Defocus-predicted</div>
+              <div className="font-bold text-blue-800">{objectiveAcuity.snellen} · logMAR {objectiveAcuity.logMAR.toFixed(2)}</div>
+            </div>
+            <div className="rounded-xl bg-purple-50 p-3 border border-purple-100">
+              <div className="text-slate-500">Tumbling-E result</div>
+              <div className="font-bold text-purple-800">
+                {testedAcuity ? `${testedAcuity.snellen} · logMAR ${testedAcuity.logMAR.toFixed(2)}` : 'Not completed'}
+              </div>
+            </div>
+          </div>
+          {acuityLogMarDifference !== null && (
+            <p className="text-[11px] font-semibold text-slate-700">Absolute logMAR difference: {acuityLogMarDifference.toFixed(2)}</p>
+          )}
+        </div>
+
+        <div className="bg-white p-5 rounded-3xl border border-slate-200/80 shadow-xs space-y-2">
+          <h3 className="font-bold text-slate-900 text-sm">Self-reported prescription power vectors</h3>
+          {session.patient.currentPrescriptionPowerVectors ? (
+            <div className="flex flex-wrap gap-2 text-xs font-mono">
+              <span className="rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">M {session.patient.currentPrescriptionPowerVectors.M.toFixed(2)} D</span>
+              <span className="rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">J0 {session.patient.currentPrescriptionPowerVectors.J0.toFixed(2)} D</span>
+              <span className="rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">J45 {session.patient.currentPrescriptionPowerVectors.J45.toFixed(2)} D</span>
+            </div>
+          ) : (
+            <p className="text-xs text-slate-500">No prescription was entered in Step 2.</p>
+          )}
+          <p className="text-[10px] text-slate-500">Thibos representation of entered sphere/cylinder/axis; not measured by the scan.</p>
         </div>
       </div>
 
@@ -522,7 +570,7 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
               </div>
               <p className="text-[11px] text-slate-400">
-                Grounded in your actual scan metrics & optical research
+                Based on your scan inputs (screening estimate, not a diagnosis)
               </p>
             </div>
           </div>
@@ -638,7 +686,7 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
             <div className="prose prose-slate prose-sm max-w-none text-xs leading-relaxed space-y-4">
               <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200/80 font-mono text-[11px] space-y-1">
                 <div>Refractive Error: {session.photorefraction.sphericalEquivalentDiopters} D</div>
-                <div>12-Mo Progression Risk: {session.riskResult.overallRiskPercent}% ({session.riskResult.riskCategory})</div>
+                <div>Screening Risk: {session.riskResult.overallRiskPercent}% ±{session.riskResult.uncertaintyMargin}% ({session.riskResult.riskCategory})</div>
                 <div>Accommodative Lag: +{session.accommodative.accommodativeLagDiopters.toFixed(2)} D</div>
                 <div>Microsaccade BCEA: {session.microsaccade.bceaDeg2} deg²</div>
               </div>

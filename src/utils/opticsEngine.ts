@@ -38,7 +38,7 @@ const ANISOMETROPIA_THRESHOLDS = { HIGH: 2.0, MODERATE: 0.75 } as const;
 // general anisometropia threshold above, reflecting AAPOS photoscreening guidance.
 const ARF_THRESHOLDS = { HIGH: 1.25, MODERATE: 0.75 } as const;
 
-/** Li et al. 2024 12-month progression regression coefficients */
+/** Illustrative Li et al. 2024-inspired 12-month progression coefficients. */
 const LI2024_COEFFICIENTS = {
   intercept: -0.082,
   se: 0.145, // higher (more negative) baseline SE -> faster progression
@@ -610,13 +610,13 @@ export function calculateMultiModalRisk(
     {
       feature: 'Photorefraction Diopters',
       impactScore: Math.abs(photo.sphericalEquivalentDiopters) * 2.5,
-      description: `Baseline refraction measured at ${photo.sphericalEquivalentDiopters} D (${photo.classification.replace('_', ' ')}).`,
+      description: `Photorefraction screening estimate: ${photo.sphericalEquivalentDiopters} D (${photo.classification.replace('_', ' ')}).`,
       category: 'OPTICAL',
     },
     {
       feature: 'Accommodative Lag',
       impactScore: accomm.accommodativeLagDiopters > 0.75 ? 6.5 : 1.5,
-      description: `Measured lag at +${accomm.accommodativeLagDiopters.toFixed(2)} D promotes hyperopic retinal defocus.`,
+      description: `Manual/self-reported lag input: +${accomm.accommodativeLagDiopters.toFixed(2)} D; elevated values increase this prototype risk estimate.`,
       category: 'ACCOMMODATIVE',
     },
     {
@@ -658,13 +658,14 @@ export function calculateMultiModalRisk(
   let currentEstimated = currentD;
   let currentHighRisk = currentD;
   let currentLowRisk = currentD;
+  const startedHyperopic = currentD > 0;
 
   for (let year = 1; year <= 5; year++) {
     const ageFactor = getAgeDecayFactor(year);
     const effectiveRate = baseAnnualProgressionRate * ageFactor;
 
     const step = (value: number, multiplier: number): number => {
-      if (value > 0) {
+      if (startedHyperopic) {
         // Hyperope: gentle emmetropisation, drift toward 0, never past it.
         const drift = effectiveRate * multiplier * 0.5;
         return Math.round(Math.max(0, value - drift) * 100) / 100;
@@ -947,8 +948,8 @@ export function calculateWeightedLinearRisk(
 // ---------------------------------------------------------------------------
 
 /**
- * 12-Month Myopia Progression Prediction Model (Li et al. 2024, Nature Sci Rep / Ophthalmology)
- * Trained on 612,530 medical records across 5 cohorts (R^2 = 0.964, MAE = 0.119 D, AUC = 0.99 for High Myopia)
+ * Illustrative reconstruction of a Li et al. (2024)-inspired 12-month
+ * progression formulation. This is not the published trained model.
  */
 export function predictMyopiaProgressionLi2024(
   patient: PatientProfile,
@@ -997,14 +998,14 @@ export function predictMyopiaProgressionLi2024(
     predictedChange12M: Math.round(predictedChange12M * 100) / 100,
     projectedDiopters12M,
     highMyopiaProbabilityPercent: Math.round(highMyopiaProbabilityPercent),
-    aucScore: 0.99,
-    maeDiopters: 0.119,
+    illustrativeOnly: true,
+    modelNote: 'Prototype reconstruction of the published formulation with illustrative coefficients; not the trained model and not clinically validated.',
   };
 }
 
 /**
- * 5-Year High Myopia Risk Deep Learning System (Foo et al. 2023, npj Digital Medicine)
- * Predicts risk of High Myopia (SE <= -6.00D) at 5 years (AUC = 0.97)
+ * Illustrative reconstruction of a Foo et al. (2023)-inspired five-year
+ * high-myopia risk formulation. This is not the published trained model.
  */
 export function predict5YearHighMyopiaRiskFoo2023(
   patient: PatientProfile,
@@ -1035,9 +1036,10 @@ export function predict5YearHighMyopiaRiskFoo2023(
 
   return {
     riskPercent5Y,
-    aucScore: 0.97,
     fundusAdapterValidated,
     riskCategory5Y,
+    illustrativeOnly: true,
+    modelNote: 'Prototype reconstruction of the published formulation with illustrative coefficients; not the trained model and not clinically validated.',
   };
 }
 
@@ -1074,7 +1076,7 @@ export function calculateRotationalAstigmatism(
  * clamp a legitimately negative j0, since that simply corresponds to an
  * axis beyond 90 degrees and clamping it would corrupt the result.
  */
-function j0AndJ45ToAxisDegrees(j0: number, j45: number): number {
+export function j0AndJ45ToAxisDegrees(j0: number, j45: number): number {
   if (j0 === 0 && j45 === 0) return 0;
   const axisRad = 0.5 * Math.atan2(j45, j0);
   let axisDegrees = Math.round((axisRad * 180) / Math.PI);

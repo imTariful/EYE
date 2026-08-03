@@ -1,6 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { AccommodativeData, MicrosaccadeData, FixationPoint } from '../types';
-import { analyzeHighFrequencyMicroFluctuations, calculateBCEA } from '../utils/opticsEngine';
+import {
+  analyzeHighFrequencyMicroFluctuations,
+  calculateBCEA,
+  detectEngbertKlieglMicrosaccades,
+  detectNPCBreak,
+} from '../utils/opticsEngine';
+import {
+  DEFAULT_ACCOMMODATIVE_LAG_D,
+  DEFAULT_NPC_CM,
+  resolveManualAccommodativeInputs,
+} from '../utils/accommodativeInputs';
 import { EyeTrackerEngine, PupilFrameResult } from '../utils/eyeTracker';
 import { QualityPanel } from './QualityIndicator';
 import {
@@ -52,9 +62,6 @@ const NPC_TARGET_START_CM = 35;
 const NPC_TARGET_END_CM = 5;
 const NPC_NORMAL_THRESHOLD_CM = 10.0;
 const ACCOMMODATIVE_LAG_NORMAL_THRESHOLD_D = 0.75;
-const DEFAULT_NPC_CM = 8.0;
-const DEFAULT_ACCOMMODATIVE_LAG_D = 0.75;
-
 const BCEA_CLAMP_MIN = 0.15;
 const BCEA_CLAMP_MAX = 2.5;
 
@@ -93,19 +100,7 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
   const [isScanning, setIsScanning] = useState(false);
   const [scanProgress, setScanProgress] = useState(0); // 0 to 100%
   const [targetDistanceCm, setTargetDistanceCm] = useState(30); // 30cm moving down to 5cm
-  const [livePoints, setLivePoints] = useState<FixationPoint[]>(() => {
-    if (microsaccade.fixationPoints && microsaccade.fixationPoints.length > 0) {
-      return microsaccade.fixationPoints;
-    }
-    const pts: FixationPoint[] = [];
-    for (let i = 0; i < 25; i++) {
-      pts.push({
-        x: Math.round((Math.random() - 0.5) * 1.2 * 100) / 100,
-        y: Math.round((Math.random() - 0.5) * 1.0 * 100) / 100,
-      });
-    }
-    return pts;
-  });
+  const [livePoints, setLivePoints] = useState<FixationPoint[]>(() => microsaccade.fixationPoints ?? []);
   const [scanCompleted, setScanCompleted] = useState(false);
 
   // Navigation Guard State
@@ -139,14 +134,12 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
   const animFrameRef = useRef<number | null>(null);
 
   // Temporary local scan state
-  const [currentNpc, setCurrentNpc] = useState(
-    Number.isFinite(accommodative.npcCm) ? accommodative.npcCm : DEFAULT_NPC_CM,
+  const initialManualInputs = resolveManualAccommodativeInputs(
+    accommodative.npcCm,
+    accommodative.accommodativeLagDiopters,
   );
-  const [currentLag, setCurrentLag] = useState(
-    Number.isFinite(accommodative.accommodativeLagDiopters)
-      ? accommodative.accommodativeLagDiopters
-      : DEFAULT_ACCOMMODATIVE_LAG_D,
-  );
+  const [currentNpc, setCurrentNpc] = useState(initialManualInputs.npcCm);
+  const [currentLag, setCurrentLag] = useState(initialManualInputs.accommodativeLagDiopters);
   const [currentFatigue, setCurrentFatigue] = useState(
     Number.isFinite(accommodative.fatigueIndex) && microsaccade.fixationPoints.length > 0
       ? accommodative.fatigueIndex
@@ -177,6 +170,11 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
   // (lag). These values are explicit user/self-reported inputs, not camera
   // measurements. Keep them deterministic when no value has been supplied.
   const pupilDiameterHistoryRef = useRef<number[]>([]);
+  const interpupillaryDistanceHistoryRef = useRef<number[]>([]);
+  const targetDistanceMmHistoryRef = useRef<number[]>([]);
+  const [cameraNpcProxyCm, setCameraNpcProxyCm] = useState<number | null>(
+    Number.isFinite(accommodative.cameraNpcProxyCm) ? accommodative.cameraNpcProxyCm! : null,
+  );
 
   const setLivePointsSynced = (updater: (prev: FixationPoint[]) => FixationPoint[]) => {
     setLivePoints((prev) => {
@@ -252,8 +250,8 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
       console.error('Camera access error:', err);
       const message =
         err instanceof DOMException && err.name === 'NotAllowedError'
-          ? 'Camera permission denied. Enable it in your browser settings, or use the simulator.'
-          : 'Camera access unavailable or blocked. You can still test with the dynamic target simulator.';
+          ? 'Camera permission denied. Enable it in your browser settings to run the fixation scan.'
+          : 'Camera access unavailable or blocked. A live camera is required for fixation measurements.';
       setCameraError(message);
       setIsCameraActive(false);
     }
@@ -353,6 +351,11 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
       await startCamera(selectedDeviceId);
     }
 
+    if (!videoRef.current?.srcObject || !canProceed) {
+      setCameraError('Wait for stable, focused eye tracking before starting the measurement scan.');
+      return;
+    }
+
     setIsScanning(true);
     setScanProgress(0);
     setScanCompleted(false);
@@ -360,6 +363,9 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
     setOdLivePoints(() => []);
     setOsLivePoints(() => []);
     pupilDiameterHistoryRef.current = [];
+    interpupillaryDistanceHistoryRef.current = [];
+    targetDistanceMmHistoryRef.current = [];
+    setCameraNpcProxyCm(null);
 
     // Guard against a second scan being started while one is already
     // running (e.g. a rapid double-click on the button).
@@ -384,6 +390,18 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
       const dist = Math.max(NPC_TARGET_END_CM, NPC_TARGET_START_CM - (step / SCAN_DURATION_STEPS) * span);
       setTargetDistanceCm(Math.round(dist * 10) / 10);
 
+      const metrics = latestMetricsRef.current;
+      if (metrics?.leftEye && metrics.rightEye && metrics.detected) {
+        interpupillaryDistanceHistoryRef.current = [
+          ...interpupillaryDistanceHistoryRef.current.slice(-59),
+          Math.abs(metrics.rightEye.x - metrics.leftEye.x),
+        ];
+        targetDistanceMmHistoryRef.current = [
+          ...targetDistanceMmHistoryRef.current.slice(-59),
+          dist * 10,
+        ];
+      }
+
       // Sample the measurable pupil signal once per scan step. This history is
       // used only for the fatigue estimate; it is not used to infer NPC or lag.
       const pupilDiameter = latestMetricsRef.current?.pupilDiameterMm;
@@ -392,14 +410,6 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
           ...pupilDiameterHistoryRef.current.slice(-59),
           pupilDiameter as number,
         ];
-      }
-
-      // Fallback noise points only when camera tracking isn't supplying
-      // real points for this tick (camera off, or CV loop hasn't caught up).
-      if (!isCameraActive || livePointsRef.current.length < step) {
-        const noiseX = (Math.random() - 0.5) * (0.8 + currentBcea * 0.4);
-        const noiseY = (Math.random() - 0.5) * (0.6 + currentBcea * 0.3);
-        setLivePointsSynced((prev) => [...prev.slice(-30), { x: noiseX, y: noiseY }]);
       }
 
       if (step >= SCAN_DURATION_STEPS) {
@@ -424,11 +434,38 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
         const odBcea = clampBcea(odBceaCalc.bceaDeg2, finalBcea);
         const osBcea = clampBcea(osBceaCalc.bceaDeg2, finalBcea);
 
+        const effectiveSamplingHz = Math.max(1, latestMetricsRef.current?.fps || 1000 / SCAN_TICK_MS);
+        const scanDurationSec = (SCAN_DURATION_STEPS * SCAN_TICK_MS) / 1000;
+        const combinedMicro = detectEngbertKlieglMicrosaccades(finalPoints, effectiveSamplingHz);
+        const odMicro = detectEngbertKlieglMicrosaccades(finalOdPoints, effectiveSamplingHz);
+        const osMicro = detectEngbertKlieglMicrosaccades(finalOsPoints, effectiveSamplingHz);
+        const frequencyFrom = (
+          count: number,
+          pointCount: number,
+          cameraDerived: boolean,
+        ): { frequencyHz: number; confidence: 'MEASURED' | 'LOW' } =>
+          cameraDerived && pointCount >= 4 && count > 0
+            ? { frequencyHz: Math.round((count / scanDurationSec) * 100) / 100, confidence: 'MEASURED' }
+            : { frequencyHz: 1.5, confidence: 'LOW' };
+        const hasPerEyeCameraPoints = finalOdPoints.length >= 4 && finalOsPoints.length >= 4;
+        const combinedFrequency = frequencyFrom(combinedMicro.count, finalPoints.length, hasPerEyeCameraPoints);
+        const odFrequency = frequencyFrom(odMicro.count, finalOdPoints.length, finalOdPoints.length >= 4);
+        const osFrequency = frequencyFrom(osMicro.count, finalOsPoints.length, finalOsPoints.length >= 4);
+
+        const npcProxy = detectNPCBreak(
+          interpupillaryDistanceHistoryRef.current,
+          targetDistanceMmHistoryRef.current,
+        );
+        const hasCameraNpcProxy = npcProxy.breakFrameIndex !== null && Number.isFinite(npcProxy.npcBreakMm);
+        const resolvedCameraNpcProxyCm = hasCameraNpcProxy ? npcProxy.npcBreakMm! / 10 : null;
+        setCameraNpcProxyCm(resolvedCameraNpcProxyCm);
+
         // NPC and accommodative lag are not directly measurable from this
         // webcam workflow. Preserve the deterministic values entered by the
         // user instead of presenting a camera-derived or random estimate.
-        const finalNpc = Number.isFinite(currentNpc) ? currentNpc : DEFAULT_NPC_CM;
-        const finalLag = Number.isFinite(currentLag) ? currentLag : DEFAULT_ACCOMMODATIVE_LAG_D;
+        const manualInputs = resolveManualAccommodativeInputs(currentNpc, currentLag);
+        const finalNpc = manualInputs.npcCm;
+        const finalLag = manualInputs.accommodativeLagDiopters;
 
         const fatigueAnalysis = analyzeHighFrequencyMicroFluctuations(
           pupilDiameterHistoryRef.current,
@@ -464,6 +501,9 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
             constrictionVelocityMmSec: 4.5,
             responseLatencyMs: 320,
           },
+          cameraNpcProxyCm: resolvedCameraNpcProxyCm ?? undefined,
+          cameraNpcProxyConfidence: hasCameraNpcProxy ? 'MODERATE' : undefined,
+          cameraNpcProxyVergenceAngleDeg: hasCameraNpcProxy ? npcProxy.vergenceAngleDeg : undefined,
         };
 
         const updatedMicro: MicrosaccadeData = {
@@ -480,16 +520,20 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
             bceaDeg2: odBcea,
             fixationStabilityScore: Math.max(40, Math.min(98, Math.round(100 - odBcea * 30))),
             fixationPoints: finalOdPoints,
-            microsaccadeFrequencyHz: 1.5 + Math.random() * 0.5,
+            microsaccadeFrequencyHz: odFrequency.frequencyHz,
+            microsaccadeFrequencyConfidence: odFrequency.confidence,
             amblyopiaRisk: amblyopiaRiskFromBcea(odBcea),
           },
           os: {
             bceaDeg2: osBcea,
             fixationStabilityScore: Math.max(40, Math.min(98, Math.round(100 - osBcea * 30))),
             fixationPoints: finalOsPoints,
-            microsaccadeFrequencyHz: 1.5 + Math.random() * 0.5,
+            microsaccadeFrequencyHz: osFrequency.frequencyHz,
+            microsaccadeFrequencyConfidence: osFrequency.confidence,
             amblyopiaRisk: amblyopiaRiskFromBcea(osBcea),
           },
+          microsaccadeFrequencyHz: combinedFrequency.frequencyHz,
+          microsaccadeFrequencyConfidence: combinedFrequency.confidence,
         };
 
         onSave(updatedAccomm, updatedMicro);
@@ -702,9 +746,9 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
           {/* Action Trigger Button */}
           <button
             onClick={startScan}
-            disabled={isScanning}
+            disabled={isScanning || !canProceed}
             className={`w-full py-3.5 rounded-2xl font-bold text-xs sm:text-sm flex items-center justify-center space-x-2 transition-all shadow-xl cursor-pointer ${
-              isScanning
+              isScanning || !canProceed
                 ? 'bg-slate-800 text-slate-500 cursor-not-allowed'
                 : 'bg-gradient-to-r from-cyan-500 via-blue-600 to-indigo-600 text-white hover:brightness-110 shadow-blue-500/20'
             }`}
@@ -788,7 +832,7 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
                     value={currentNpc}
                     onChange={(e) => {
                       const value = e.target.valueAsNumber;
-                      setCurrentNpc(Number.isFinite(value) && value > 0 ? value : DEFAULT_NPC_CM);
+                      setCurrentNpc(resolveManualAccommodativeInputs(value, currentLag).npcCm);
                     }}
                     className="w-20 rounded-lg border border-slate-300 bg-white px-2 py-1 text-sm font-bold text-slate-900"
                   />
@@ -819,7 +863,7 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
                     value={currentLag}
                     onChange={(e) => {
                       const value = e.target.valueAsNumber;
-                      setCurrentLag(Number.isFinite(value) && value >= 0 ? value : DEFAULT_ACCOMMODATIVE_LAG_D);
+                      setCurrentLag(resolveManualAccommodativeInputs(currentNpc, value).accommodativeLagDiopters);
                     }}
                     className="w-20 rounded-lg border border-slate-300 bg-white px-2 py-1 text-sm font-bold text-slate-900"
                   />
@@ -842,6 +886,31 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
                   <div className="text-[9px] font-semibold text-cyan-700">
                     {scanCompleted ? 'Measured this scan' : 'Previous / neutral value'}
                   </div>
+                </div>
+              </div>
+
+              <div className="bg-indigo-50 p-3.5 rounded-2xl border border-indigo-200/80">
+                <div className="text-[11px] font-semibold text-indigo-800">Microsaccade Frequency</div>
+                <div className="mt-1 text-lg font-bold text-indigo-950">
+                  {microsaccade.microsaccadeFrequencyHz.toFixed(2)} Hz
+                </div>
+                <div className="text-[9px] font-semibold text-indigo-700">
+                  {microsaccade.microsaccadeFrequencyConfidence === 'MEASURED'
+                    ? 'Engbert-Kliegl events from this scan'
+                    : 'Low-confidence neutral fallback'}
+                </div>
+              </div>
+
+              <div className="bg-amber-50 p-3.5 rounded-2xl border border-amber-200/80">
+                <div className="text-[11px] font-semibold text-amber-800">Camera Vergence Proxy</div>
+                <div className="mt-1 text-lg font-bold text-amber-950">
+                  {cameraNpcProxyCm !== null ? `${cameraNpcProxyCm.toFixed(1)} cm` : 'No break detected'}
+                </div>
+                <div
+                  className="text-[9px] font-semibold text-amber-700"
+                  title="Estimated from change in the pixel distance between the eyes as the target approaches. This is not a clinical NPC measurement and does not replace the manual value above."
+                >
+                  Webcam convergence trend only; not clinical NPC
                 </div>
               </div>
             </div>
@@ -868,9 +937,9 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
                   saveManualMetrics();
                   onNext();
                 }}
-                disabled={!canProceed && isCameraActive}
+                disabled={!scanCompleted}
                 className={`inline-flex items-center space-x-2 px-6 py-2.5 rounded-xl font-bold text-xs sm:text-sm shadow-md transition-all cursor-pointer ${
-                  canProceed || !isCameraActive
+                  scanCompleted
                     ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-blue-500/20'
                     : 'bg-slate-300 text-slate-500 cursor-not-allowed'
                 }`}
@@ -880,6 +949,11 @@ export const Step3AccommodativeScan: React.FC<Step3AccommodativeScanProps> = ({
               </button>
             </div>
           </div>
+          {!scanCompleted && (
+            <p className="text-right text-[10px] font-medium text-amber-700">
+              Complete a stable live-camera fixation scan before continuing. No simulated fixation points are used.
+            </p>
+          )}
         </div>
       </div>
     </div>

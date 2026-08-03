@@ -206,13 +206,16 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
   const hasTrustedMeasurement =
     liveMetrics.detected && liveMetrics.confidenceScore >= MIN_DETECTION_CONFIDENCE_TO_TRUST_EYE;
   const eyeDetected = (isCameraActive || !!uploadedImage) && hasTrustedMeasurement;
+  const manualCalibrationAccepted = advancedCalibrationOpen && !isCameraActive && !uploadedImage;
   const isChild = patient.age < 18;
-  const showDiopterReading = eyeDetected;
+  const showDiopterReading = eyeDetected || manualCalibrationAccepted;
 
   // Formula inputs: measured when camera/upload has eyes; manual sliders in calibration mode only
   const formulaCrescent = eyeDetected ? liveMetrics.crescentRatio : crescentRatio;
   const formulaPupil = eyeDetected ? liveMetrics.pupilDiameterMm : pupilDiameter;
-  const formulaReflex = liveMetrics.redReflexIntensity;
+  const formulaReflex = eyeDetected
+    ? liveMetrics.redReflexIntensity
+    : photorefraction.redReflexIntensityRatio;
   const formulaOrientation: CrescentOrientation = eyeDetected
     ? (liveMetrics.crescentOrientation ?? orientation)
     : orientation;
@@ -1086,7 +1089,11 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
               <div className="flex justify-between items-center text-xs text-blue-200">
                 <span className="font-medium">Spherical Equivalent</span>
                 <span className="bg-blue-500/20 text-blue-300 px-2 py-0.5 rounded-full text-[10px] font-bold border border-blue-400/30">
-                  {currentPhotoData.confidenceScore}% Confidence
+                  {eyeDetected
+                    ? `${currentPhotoData.confidenceScore}% quality score`
+                    : manualCalibrationAccepted
+                      ? 'Manual research inputs'
+                      : 'Awaiting trusted sample'}
                 </span>
               </div>
 
@@ -1110,7 +1117,7 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
               <div className="pt-2 border-t border-slate-800 flex justify-between items-center text-xs">
                 <span className="text-slate-300 font-semibold">Refractive State:</span>
                 <span className="font-bold text-cyan-400 bg-cyan-950/60 px-2.5 py-1 rounded-lg border border-cyan-800">
-                  {currentPhotoData.classification.replace('_', ' ')}
+                  {showDiopterReading ? currentPhotoData.classification.replace('_', ' ') : 'AWAITING SAMPLE'}
                 </span>
               </div>
             </div>
@@ -1119,17 +1126,17 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
             <div className="space-y-2 text-xs">
               <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/80 flex justify-between items-center">
                 <span className="text-slate-600 font-medium">Estimated Astigmatism:</span>
-                <span className="font-bold text-slate-900">{currentPhotoData.astigmatismCylinderDiopters} Cyl</span>
+                <span className="font-bold text-slate-900">{showDiopterReading ? `${currentPhotoData.astigmatismCylinderDiopters} Cyl` : '—'}</span>
               </div>
 
               <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/80 flex justify-between items-center">
                 <span className="text-slate-600 font-medium">Pupil Diameter:</span>
-                <span className="font-bold text-slate-900">{currentPhotoData.pupilDiameterMm} mm</span>
+                <span className="font-bold text-slate-900">{showDiopterReading ? `${currentPhotoData.pupilDiameterMm} mm` : '—'}</span>
               </div>
 
               <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/80 flex justify-between items-center">
                 <span className="text-slate-600 font-medium">Red Reflex Intensity:</span>
-                <span className="font-bold text-slate-900">{Math.round(currentPhotoData.redReflexIntensityRatio * 100)}%</span>
+                <span className="font-bold text-slate-900">{showDiopterReading ? `${Math.round(currentPhotoData.redReflexIntensityRatio * 100)}%` : '—'}</span>
               </div>
             </div>
           </div>
@@ -1155,9 +1162,9 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
                   onSave(currentPhotoData);
                   onNext();
                 }}
-                disabled={!canProceed && isCameraActive}
+                disabled={!hasTrustedMeasurement && !manualCalibrationAccepted}
                 className={`inline-flex items-center space-x-2 px-6 py-2.5 rounded-xl font-bold text-xs sm:text-sm shadow-md transition-all cursor-pointer ${
-                  canProceed || !isCameraActive
+                  hasTrustedMeasurement || manualCalibrationAccepted
                     ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-blue-500/20'
                     : 'bg-slate-300 text-slate-500 cursor-not-allowed'
                 }`}
@@ -1167,6 +1174,11 @@ export const Step4PhotorefractionScan: React.FC<Step4PhotorefractionScanProps> =
               </button>
             </div>
           </div>
+          {!hasTrustedMeasurement && !manualCalibrationAccepted && (
+            <p className="text-right text-[10px] font-medium text-amber-700">
+              Capture a trusted eye sample, upload usable media, or open Advanced Calibration to continue with clearly manual research inputs.
+            </p>
+          )}
         </div>
       </div>
     </div>

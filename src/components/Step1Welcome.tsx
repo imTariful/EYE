@@ -25,7 +25,7 @@ export const Step1Welcome: React.FC<Step1WelcomeProps> = ({ onStart }) => {
         <div className="relative z-10 max-w-3xl space-y-6">
           <div className="inline-flex items-center space-x-2 px-3.5 py-1.5 rounded-full bg-blue-500/10 border border-blue-400/30 text-blue-300 text-xs font-semibold backdrop-blur-md">
             <Sparkles className="w-4 h-4 text-cyan-400" />
-            <span>AI Ophthalmic Technology • Smartphone Photorefraction</span>
+            <span>Research Screening Prototype • Smartphone Photorefraction</span>
           </div>
 
           <h1 className="text-3xl sm:text-5xl font-extrabold tracking-tight text-white font-display leading-tight">
@@ -33,9 +33,7 @@ export const Step1Welcome: React.FC<Step1WelcomeProps> = ({ onStart }) => {
           </h1>
 
           <p className="text-slate-300 text-base sm:text-lg leading-relaxed font-normal max-w-2xl">
-            OcuRisk transforms standard smartphone camera hardware into an AI-powered ophthalmic tool. 
-            By analyzing pupillary red reflex crescents, accommodative lag dynamics, and fixational microsaccades, 
-            it computes a 12-month myopia progression risk score.
+            OcuRisk is a research screening prototype that uses a consumer camera to analyze pupillary red-reflex crescents and fixation signals, then combines them with questionnaire and manual inputs to estimate myopia risk.
           </p>
 
           <div className="pt-2 flex flex-wrap gap-4 items-center">
@@ -49,7 +47,7 @@ export const Step1Welcome: React.FC<Step1WelcomeProps> = ({ onStart }) => {
 
             <div className="flex items-center space-x-2 text-xs text-slate-400 bg-slate-800/80 px-4 py-3 rounded-2xl border border-slate-700/60">
               <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
-              <span>Non-invasive • Camera & Sensor Based • Privacy First</span>
+              <span>Non-invasive • Local Camera CV • Optional Gemini Features</span>
             </div>
           </div>
         </div>
@@ -62,7 +60,7 @@ export const Step1Welcome: React.FC<Step1WelcomeProps> = ({ onStart }) => {
             Multi-Modal Ophthalmic Architecture
           </h2>
           <p className="text-sm text-slate-600">
-            Ground-breaking computer vision and Bayesian probabilistic risk modeling
+            Browser computer vision and prototype Bayesian risk modeling
           </p>
         </div>
 
@@ -89,7 +87,7 @@ export const Step1Welcome: React.FC<Step1WelcomeProps> = ({ onStart }) => {
             </div>
             <h3 className="font-bold text-slate-900 text-base">2. Accommodative Testing</h3>
             <p className="text-xs text-slate-600 leading-relaxed">
-              Tracks Near Point of Convergence (NPC) and accommodative lag (+0.25 to +2.0D) to detect eye strain and hyperopic retinal defocus.
+              Measures pupil micro-fluctuation and fixation signals while keeping NPC and accommodative lag as clearly labelled manual inputs. A camera vergence trend may be shown only as a non-clinical proxy.
             </p>
             <div className="pt-2 flex items-center text-[11px] font-semibold text-cyan-700 space-x-1">
               <Check className="w-3.5 h-3.5" />
@@ -104,7 +102,7 @@ export const Step1Welcome: React.FC<Step1WelcomeProps> = ({ onStart }) => {
             </div>
             <h3 className="font-bold text-slate-900 text-base">3. Microsaccade BCEA</h3>
             <p className="text-xs text-slate-600 leading-relaxed">
-              Computes Bivariate Contour Ellipse Area (BCEA in deg²) from short video fixations to detect early ocular-motor deficits or amblyopia risk.
+              Computes Bivariate Contour Ellipse Area (BCEA in deg²) and an event-frequency estimate from short video fixations as screening indicators of fixation stability.
             </p>
             <div className="pt-2 flex items-center text-[11px] font-semibold text-indigo-700 space-x-1">
               <Check className="w-3.5 h-3.5" />

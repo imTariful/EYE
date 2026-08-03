@@ -52,7 +52,8 @@ const DEFAULT_ACCOMMODATIVE: AccommodativeData = {
 const DEFAULT_MICROSACCADE: MicrosaccadeData = {
   bceaDeg2: 0.82,
   fixationStabilityScore: 72,
-  microsaccadeFrequencyHz: 2.2,
+  microsaccadeFrequencyHz: 1.5,
+  microsaccadeFrequencyConfidence: 'LOW',
   fixationPoints: [],
   amblyopiaRisk: 'MODERATE',
 };
@@ -249,7 +250,7 @@ export default function App() {
               Medical Disclaimer
             </button>
             <span>•</span>
-            <span>Powered by AI & OpenCV Photorefraction</span>
+            <span>Powered by MediaPipe + Browser Computer Vision</span>
           </div>
         </div>
       </footer>

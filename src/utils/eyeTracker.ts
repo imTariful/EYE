@@ -6,8 +6,8 @@
  *  - One Euro Filter for landmark smoothing (adaptive: heavy smoothing when still,
  *    light smoothing during fast movement — better jitter/lag tradeoff than a fixed-gain
  *    Kalman filter for this kind of noisy-but-bounded landmark signal)
- *  - Real pupil-boundary search (cropped, Otsu-thresholded dark-region centroid) instead
- *    of an assumed constant radius, so pupil diameter is an actual measurement
+ *  - Real pupil-boundary search (cropped, Otsu-thresholded dark-region centroid) with
+ *    conservative radial-contrast refinement instead of an assumed constant radius
  *  - Advanced CV fallback (YCbCr skin segmentation + dark-region search) when MediaPipe
  *    is unavailable
  *  - Laplacian blur variance + CRADLE multi-frame leukocoria aggregation
@@ -1568,8 +1568,9 @@ function findPupilBoundary(
 
   if (count < 4) return null;
 
-  // Area -> radius assuming a roughly circular pupil disc
-  const radius = Math.min(irisRadiusPx * 0.9, Math.max(irisRadiusPx * 0.15, Math.sqrt(count / Math.PI)));
+  // Area -> radius assuming a roughly circular pupil disc, followed by a small
+  // contrast-weighted correction based on the radial brightness profile.
+  const areaRadius = Math.min(irisRadiusPx * 0.9, Math.max(irisRadiusPx * 0.15, Math.sqrt(count / Math.PI)));
 
   // Re-center on the MEASURED dark-region centroid instead of just returning the
   // radius and leaving the position as whatever the landmark said. The correction is
@@ -1581,6 +1582,28 @@ function findPupilBoundary(
   const maxShiftPx = irisRadiusPx * 0.35;
   const shiftX = Math.max(-maxShiftPx, Math.min(maxShiftPx, measuredLocalX - cx));
   const shiftY = Math.max(-maxShiftPx, Math.min(maxShiftPx, measuredLocalY - cy));
+  const radialContrastSamples: number[] = [];
+  const radialBins = 24;
+  for (let bin = 0; bin < radialBins; bin++) {
+    const sampleRadius = ((bin + 0.5) / radialBins) * searchRadius;
+    let luminanceSum = 0;
+    let samples = 0;
+    for (let angleIndex = 0; angleIndex < 16; angleIndex++) {
+      const angle = (angleIndex / 16) * Math.PI * 2;
+      const sampleX = Math.round(measuredLocalX + Math.cos(angle) * sampleRadius);
+      const sampleY = Math.round(measuredLocalY + Math.sin(angle) * sampleRadius);
+      if (sampleX < 0 || sampleX >= imgData.width || sampleY < 0 || sampleY >= imgData.height) continue;
+      const idx = (sampleY * imgData.width + sampleX) * 4;
+      luminanceSum += 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+      samples++;
+    }
+    radialContrastSamples.push(samples > 0 ? Math.max(0, 255 - luminanceSum / samples) : 0);
+  }
+  const refinement = computeRadialPupilContrastRefinement(radialContrastSamples, areaRadius, searchRadius);
+  const radius = Math.min(
+    irisRadiusPx * 0.9,
+    Math.max(irisRadiusPx * 0.15, areaRadius * refinement.pupilScaleFactor),
+  );
 
   return {
     radius,
@@ -1735,28 +1758,37 @@ export function isRedHueInHSV(r: number, g: number, b: number): boolean {
 }
 
 /**
- * Fourier-Mellin Correlation (FMC) Pupil Dilation & Scale Shift Analyzer
- * Converts log-polar magnitude spectrum shifts into subpixel pupil scale change (Meyers & Vlachos, 2025)
+ * Contrast-weighted radial pupil-boundary refinement.
+ *
+ * Larger profile values represent stronger dark-pupil contrast. The returned scale
+ * correction is tightly bounded and refines an existing area-derived radius. This is
+ * a heuristic image-space refinement, not Fourier-Mellin registration or mm calibration.
  */
-export function computeFourierMellinPupilDilation(
-  pupilPixels: number[],
-  radiusPx: number
-): { pupilScaleFactor: number; subpixelDiameterMm: number } {
+export function computeRadialPupilContrastRefinement(
+  radialContrast: number[],
+  radiusPx: number,
+  profileRadiusPx: number = radiusPx,
+): { pupilScaleFactor: number; refinedDiameterPx: number } {
   let totalEnergy = 0;
   let weightedRadiusSum = 0;
-  const n = pupilPixels.length;
+  const n = radialContrast.length;
 
   for (let i = 0; i < n; i++) {
-    const val = pupilPixels[i];
+    const val = Math.max(0, radialContrast[i]);
     totalEnergy += val;
-    weightedRadiusSum += val * (i / Math.max(1, n));
+    weightedRadiusSum += val * ((i + 0.5) / Math.max(1, n));
   }
 
-  const meanRadiusRatio = totalEnergy > 0 ? weightedRadiusSum / totalEnergy : 0.5;
-  const pupilScaleFactor = Math.min(1.5, Math.max(0.5, 0.8 + meanRadiusRatio * 0.4));
-  const subpixelDiameterMm = Math.round((radiusPx * 2 * 0.28 * pupilScaleFactor) * 100) / 100;
+  if (totalEnergy <= 0 || radiusPx <= 0 || profileRadiusPx <= 0) {
+    return { pupilScaleFactor: 1, refinedDiameterPx: Math.max(0, radiusPx * 2) };
+  }
 
-  return { pupilScaleFactor, subpixelDiameterMm };
+  const contrastCentroidRadiusPx = (weightedRadiusSum / totalEnergy) * profileRadiusPx;
+  const rawScale = contrastCentroidRadiusPx / radiusPx;
+  const pupilScaleFactor = Math.min(1.12, Math.max(0.88, 0.5 + rawScale * 0.5));
+  const refinedDiameterPx = Math.round(radiusPx * 2 * pupilScaleFactor * 100) / 100;
+
+  return { pupilScaleFactor, refinedDiameterPx };
 }
 
 /**

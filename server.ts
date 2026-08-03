@@ -18,7 +18,7 @@ function getGenAI(): GoogleGenAI {
   if (!genAIClient) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-      console.warn('GEMINI_API_KEY is missing in process.env. System will use intelligent rule fallback if unconfigured.');
+      console.warn('GEMINI_API_KEY is missing. AI features will use predefined fallback text when Gemini is unavailable.');
     }
     genAIClient = new GoogleGenAI({
       apiKey: apiKey || 'DUMMY_KEY_FOR_LOCAL_DEV',
@@ -264,31 +264,6 @@ Based on the multi-modal photorefraction and accommodative scan, patient shows a
 *Medical Disclaimer: OcuRisk is an AI screening tool, not a diagnostic device. Please consult a licensed eye care professional.*`,
     });
   }
-});
-
-// Endpoint: Photo Analysis simulation API
-app.post('/api/analyze-photo', (req, res) => {
-  const { imageBase64 } = req.body;
-  if (!imageBase64) {
-    return res.status(400).json({ error: 'Image base64 string required.' });
-  }
-
-  // Simulate red reflex and pupil crescent extraction
-  const mockCrescentRatio = 0.28;
-  const mockOrientation = 'TOP';
-  const mockPupilDiameter = 5.8;
-  const mockRedReflexRatio = 0.89;
-
-  res.json({
-    pupilDiameterMm: mockPupilDiameter,
-    redReflexIntensityRatio: mockRedReflexRatio,
-    crescentHeightRatio: mockCrescentRatio,
-    crescentOrientation: mockOrientation,
-    sphericalEquivalentDiopters: -2.5, // Fallback - real analysis is client-side via processImage
-    astigmatismCylinderDiopters: -0.5,
-    classification: 'MODERATE_MYOPIA',
-    confidenceScore: 92,
-  });
 });
 
 // ------------------- SERVER BOOT & VITE MIDDLEWARE ------------------- //
