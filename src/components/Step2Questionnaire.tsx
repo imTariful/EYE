@@ -21,6 +21,27 @@ interface Step2QuestionnaireProps {
 
 type AcuityDirection = '↑' | '↓' | '←' | '→';
 
+const ACUITY_LINES = [
+  { denominator: '200', logMAR: 1.0, fontPx: 144 },
+  { denominator: '100', logMAR: 0.7, fontPx: 112 },
+  { denominator: '80', logMAR: 0.6, fontPx: 92 },
+  { denominator: '70', logMAR: 0.54, fontPx: 80 },
+  { denominator: '60', logMAR: 0.48, fontPx: 70 },
+  { denominator: '50', logMAR: 0.4, fontPx: 60 },
+  { denominator: '40', logMAR: 0.3, fontPx: 50 },
+  { denominator: '30', logMAR: 0.18, fontPx: 40 },
+  { denominator: '25', logMAR: 0.1, fontPx: 32 },
+  { denominator: '20', logMAR: 0.0, fontPx: 26 },
+] as const;
+
+function acuityRotationDegrees(direction: AcuityDirection): number {
+  // A normal capital E opens to the right.
+  if (direction === '→') return 0;
+  if (direction === '↓') return 90;
+  if (direction === '←') return 180;
+  return -90;
+}
+
 function randomAcuityDirection(): AcuityDirection {
   const directions: AcuityDirection[] = ['↑', '↓', '←', '→'];
   return directions[Math.floor(Math.random() * directions.length)];
@@ -47,41 +68,36 @@ export const Step2Questionnaire: React.FC<Step2QuestionnaireProps> = ({
     });
   };
 
-  const handleAcuityResponse = (direction: AcuityDirection) => {
-    const snellenValues = ['20', '25', '30', '40', '50', '60', '70', '80', '100', '200'];
-    const logMARValues = [0.0, 0.1, 0.18, 0.3, 0.4, 0.48, 0.54, 0.6, 0.7, 1.0];
-    
-    if (direction === currentEDirection) {
-      // Correct answer - move to next line
-      if (acuityLine < snellenValues.length - 1) {
-        setAcuityLine(acuityLine + 1);
-        setAcuityDirection(randomAcuityDirection());
-      } else {
-        // Completed all lines successfully
-        onChange({
-          ...patient,
-          visualAcuity: {
-            logMAR: logMARValues[acuityLine],
-            snellen: `20/${snellenValues[acuityLine]}`,
-            tested: true,
-          },
-        });
-        setAcuityLine(0);
-        setAcuityDirection(randomAcuityDirection());
-      }
-    } else {
-      // Incorrect answer - record current line as acuity
-      const actualLine = Math.max(0, acuityLine - 1);
+  const handleAcuityResponse = (direction: AcuityDirection | 'TOO_BLURRY') => {
+    const finishAcuityTest = (lineIndex: number, response: 'IDENTIFIED' | 'TOO_BLURRY' | 'INCORRECT') => {
+      const line = ACUITY_LINES[lineIndex];
       onChange({
         ...patient,
         visualAcuity: {
-          logMAR: logMARValues[actualLine],
-          snellen: `20/${snellenValues[actualLine]}`,
+          logMAR: line.logMAR,
+          snellen: `20/${line.denominator}`,
           tested: true,
+          response,
         },
       });
       setAcuityLine(0);
       setAcuityDirection(randomAcuityDirection());
+    };
+
+    if (direction === 'TOO_BLURRY') {
+      // The previous line is the smallest one identified confidently. At the
+      // first line, 20/200 is retained as this exercise's display limit.
+      finishAcuityTest(Math.max(0, acuityLine - 1), 'TOO_BLURRY');
+    } else if (direction === currentEDirection) {
+      // Advance from large/easy symbols toward smaller/more difficult symbols.
+      if (acuityLine < ACUITY_LINES.length - 1) {
+        setAcuityLine(acuityLine + 1);
+        setAcuityDirection(randomAcuityDirection());
+      } else {
+        finishAcuityTest(acuityLine, 'IDENTIFIED');
+      }
+    } else {
+      finishAcuityTest(Math.max(0, acuityLine - 1), 'INCORRECT');
     }
   };
 
@@ -369,23 +385,30 @@ export const Step2Questionnaire: React.FC<Step2QuestionnaireProps> = ({
             <span>Visual Acuity Test (Optional)</span>
           </h3>
           <p className="text-xs text-slate-600">
-            Test distance vision using a digital Snellen chart. Stand 6 feet (2 meters) from your screen and identify the direction of the "E" symbols.
+             This is an approximate visual-acuity screening exercise, not a clinical eye test. Stand about 6 feet (2 meters) from your screen and identify the direction of the "E" only when you are confident. If it looks blurred, choose “Too blurry”.
           </p>
 
           {!patient.visualAcuity?.tested ? (
             <div className="space-y-4">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-semibold text-slate-700">Current Line Size:</span>
-                <span className="text-xs font-bold text-purple-600">20/{['20', '25', '30', '40', '50', '60', '70', '80', '100', '200'][acuityLine]}</span>
+                <span className="text-xs font-bold text-purple-600">20/{ACUITY_LINES[acuityLine].denominator}</span>
               </div>
               
               <div className="bg-slate-900 rounded-2xl p-8 flex items-center justify-center min-h-[200px]">
-                <div className="text-white font-bold text-6xl transform" style={{ transform: `rotate(${currentEDirection === '↑' ? 0 : currentEDirection === '→' ? 90 : currentEDirection === '↓' ? 180 : -90}deg)` }}>
+                <div
+                  className="text-white font-bold leading-none transform transition-all duration-300"
+                  style={{
+                    fontSize: `${ACUITY_LINES[acuityLine].fontPx}px`,
+                    transform: `rotate(${acuityRotationDegrees(currentEDirection)}deg)`,
+                  }}
+                  aria-label={`Tumbling E, ${currentEDirection === '↑' ? 'up' : currentEDirection === '↓' ? 'down' : currentEDirection === '←' ? 'left' : 'right'}`}
+                >
                   E
                 </div>
               </div>
 
-              <div className="grid grid-cols-4 gap-2">
+               <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                 {[
                   { dir: '↑', label: 'Up' },
                   { dir: '↓', label: 'Down' },
@@ -401,8 +424,15 @@ export const Step2Questionnaire: React.FC<Step2QuestionnaireProps> = ({
                     {opt.label}
                   </button>
                 ))}
-              </div>
-              <p className="text-[11px] text-slate-500 text-center">Click the direction the "E" is pointing. Test progresses through 10 lines.</p>
+               </div>
+               <button
+                 type="button"
+                 onClick={() => handleAcuityResponse('TOO_BLURRY')}
+                 className="w-full p-3 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900 text-sm font-semibold transition-all cursor-pointer"
+               >
+                 Too blurry / I can’t identify the E
+               </button>
+               <p className="text-[11px] text-slate-500 text-center">The exercise moves through 10 lines and reports an approximate screening result.</p>
             </div>
           ) : (
             <div className="bg-purple-50 p-4 rounded-2xl border border-purple-200">
@@ -410,7 +440,9 @@ export const Step2Questionnaire: React.FC<Step2QuestionnaireProps> = ({
                 <div>
                   <div className="text-xs font-semibold text-purple-900">Visual Acuity Recorded</div>
                   <div className="text-sm font-bold text-purple-700 mt-1">
-                    {patient.visualAcuity.snellen} (LogMAR: {patient.visualAcuity.logMAR})
+                     Approx. {patient.visualAcuity.snellen} (LogMAR: {patient.visualAcuity.logMAR})
+                     {patient.visualAcuity.response === 'TOO_BLURRY' && ' - stopped when the next line was too blurry'}
+                     {patient.visualAcuity.response === 'INCORRECT' && ' - stopped after an incorrect direction'}
                   </div>
                 </div>
                 <button

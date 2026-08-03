@@ -21,6 +21,7 @@ import {
   RotateCcw,
   Bot,
   FileText,
+  Stethoscope,
   X,
 } from 'lucide-react';
 
@@ -67,6 +68,8 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
   // AI Generated Report Summary State
   const [reportMarkdown, setReportMarkdown] = useState<string | null>(session.aiNotes || null);
   const [reportError, setReportError] = useState<string | null>(null);
+  const [recommendationExplanation, setRecommendationExplanation] = useState<string | null>(null);
+  const [isExplainingRecommendation, setIsExplainingRecommendation] = useState(false);
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
   const modalRef = useRef<HTMLDivElement>(null);
@@ -173,6 +176,28 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
     }
   };
 
+  const handleExplainRecommendation = async () => {
+    if (isExplainingRecommendation) return;
+    setIsExplainingRecommendation(true);
+    try {
+      const res = await fetch('/api/llm-agent/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: 'Explain my recommended next step in simple language. State which screening findings triggered it, how soon I should arrange professional care, and what questions I should ask. Do not diagnose me.',
+          session,
+          conversationHistory: [],
+        }),
+      });
+      const data = await res.json();
+      setRecommendationExplanation(data.reply || data.fallbackReply || FALLBACK_CHAT_REPLY);
+    } catch {
+      setRecommendationExplanation(FALLBACK_CHAT_REPLY);
+    } finally {
+      setIsExplainingRecommendation(false);
+    }
+  };
+
   // Per-eye display values, resolved once instead of four times per card.
   const odValue = eyeValue(session.photorefraction.od, 'sphericalEquivalentDiopters', session.photorefraction.sphericalEquivalentDiopters);
   const osValue = eyeValue(session.photorefraction.os, 'sphericalEquivalentDiopters', session.photorefraction.sphericalEquivalentDiopters);
@@ -194,6 +219,21 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
   const acuityLogMarDifference = testedAcuity
     ? Math.abs(objectiveAcuity.logMAR - testedAcuity.logMAR)
     : null;
+  const abnormalRedReflex = session.riskResult.cradleLeukocoria?.isPositive === true;
+  const reducedApproximateAcuity = Boolean(testedAcuity && testedAcuity.logMAR >= 0.3);
+  const reportedBlur = session.patient.symptoms.distanceBlur || testedAcuity?.response === 'TOO_BLURRY';
+  const referralLevel: 'URGENT' | 'ROUTINE_EXAM' | 'MONITOR' = abnormalRedReflex
+    ? 'URGENT'
+    : anisometropiaFlagged || reducedApproximateAcuity || reportedBlur
+      ? 'ROUTINE_EXAM'
+      : 'MONITOR';
+
+  const referralReasons = [
+    abnormalRedReflex && 'an abnormal multi-frame red-reflex flag',
+    anisometropiaFlagged && 'a meaningful difference between the two eye estimates',
+    reducedApproximateAcuity && `an approximate acuity result of ${testedAcuity?.snellen}`,
+    reportedBlur && 'reported or observed difficulty identifying distance detail',
+  ].filter((reason): reason is string => Boolean(reason));
 
   return (
     <div className="space-y-8 animate-in fade-in duration-300 max-w-7xl mx-auto">
@@ -261,6 +301,23 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
             <span>New Patient Scan</span>
           </button>
         </div>
+      </div>
+
+      <div
+        aria-live="polite"
+        className={`rounded-2xl border px-4 py-3 text-sm font-semibold ${
+          referralLevel === 'URGENT'
+            ? 'border-rose-300 bg-rose-50 text-rose-900'
+            : referralLevel === 'ROUTINE_EXAM'
+              ? 'border-amber-300 bg-amber-50 text-amber-900'
+              : 'border-emerald-200 bg-emerald-50 text-emerald-900'
+        }`}
+      >
+        {referralLevel === 'URGENT'
+          ? 'Recommended next step: seek prompt professional eye assessment.'
+          : referralLevel === 'ROUTINE_EXAM'
+            ? 'Recommended next step: arrange a routine comprehensive eye examination.'
+            : 'Recommended next step: continue routine eye care and monitor for symptoms.'}
       </div>
 
       {/* Eye Selector Toggle */}
@@ -490,7 +547,7 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
             <div className="rounded-xl bg-purple-50 p-3 border border-purple-100">
               <div className="text-slate-500">Tumbling-E result</div>
               <div className="font-bold text-purple-800">
-                {testedAcuity ? `${testedAcuity.snellen} · logMAR ${testedAcuity.logMAR.toFixed(2)}` : 'Not completed'}
+                {testedAcuity ? `Approx. ${testedAcuity.snellen} · logMAR ${testedAcuity.logMAR.toFixed(2)}${testedAcuity.response === 'TOO_BLURRY' ? ' (next line too blurry)' : testedAcuity.response === 'INCORRECT' ? ' (stopped after incorrect response)' : ''}` : 'Not completed'}
               </div>
             </div>
           </div>
@@ -513,6 +570,64 @@ export const Step6ResultsReport: React.FC<Step6ResultsReportProps> = ({
           <p className="text-[10px] text-slate-500">Thibos representation of entered sphere/cylinder/axis; not measured by the scan.</p>
         </div>
       </div>
+
+      <section
+        className={`rounded-3xl border p-6 shadow-xs ${
+          referralLevel === 'URGENT'
+            ? 'border-rose-300 bg-rose-50'
+            : referralLevel === 'ROUTINE_EXAM'
+              ? 'border-amber-300 bg-amber-50'
+              : 'border-emerald-200 bg-emerald-50'
+        }`}
+      >
+        <div className="flex items-start gap-3">
+          <div className={`rounded-2xl p-2.5 ${referralLevel === 'URGENT' ? 'bg-rose-100 text-rose-700' : referralLevel === 'ROUTINE_EXAM' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>
+            <Stethoscope className="h-5 w-5" />
+          </div>
+          <div className="space-y-2">
+            <h2 className="text-base font-bold text-slate-900">Recommended next step</h2>
+            {referralLevel === 'URGENT' ? (
+              <>
+                <p className="text-sm font-semibold text-rose-950">
+                  Seek prompt assessment from an ophthalmologist or urgent eye-care service.
+                </p>
+                <p className="text-xs leading-relaxed text-rose-900">
+                  This recommendation is based on {referralReasons.join(', ')}. Bring this screening summary, but do not use it to select glasses or change treatment without a professional examination.
+                </p>
+              </>
+            ) : referralLevel === 'ROUTINE_EXAM' ? (
+              <>
+                <p className="text-sm font-semibold text-amber-950">
+                  Arrange a routine comprehensive eye examination with an optometrist or ophthalmologist.
+                </p>
+                <p className="text-xs leading-relaxed text-amber-900">
+                  This recommendation is based on {referralReasons.join(', ')}. Bring this screening summary, but do not use it to select glasses or change treatment without a professional examination.
+                </p>
+              </>
+            ) : (
+              <p className="text-xs leading-relaxed text-emerald-900">
+                No referral-triggering finding was produced. Continue routine eye checks and healthy visual habits. Arrange professional care if symptoms appear or worsen; a normal screening does not rule out eye disease.
+              </p>
+            )}
+            <p className="text-[11px] font-semibold text-slate-700">
+              Sudden vision loss, severe eye pain, new persistent double vision, eye injury, or a new white-pupil appearance requires urgent medical assessment.
+            </p>
+            <button
+              type="button"
+              onClick={handleExplainRecommendation}
+              disabled={isExplainingRecommendation}
+              className="rounded-xl bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
+            >
+              {isExplainingRecommendation ? 'Asking Gemini...' : 'Ask Gemini to explain this recommendation'}
+            </button>
+            {recommendationExplanation && (
+              <div className="whitespace-pre-line rounded-2xl border border-slate-200 bg-white p-4 text-xs leading-relaxed text-slate-700">
+                {recommendationExplanation}
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
 
       {/* Main Content Area: Charts & AI Chat Agent */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">

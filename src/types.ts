@@ -31,6 +31,7 @@ export interface PatientProfile {
     logMAR: number;
     snellen: string;
     tested: boolean;
+    response?: 'IDENTIFIED' | 'TOO_BLURRY' | 'INCORRECT';
   };
 }
 
