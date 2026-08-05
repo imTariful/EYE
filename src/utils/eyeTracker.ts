@@ -369,18 +369,21 @@ export class EyeTrackerEngine {
     this.mediaPipeLoadProgress = 0;
     this.mediaPipeLoadError = null;
 
-    try {
-      this.mediaPipeLoadProgress = 20;
-      const filesetResolver = await FilesetResolver.forVisionTasks(
-        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm'
-      );
-      this.mediaPipeLoadProgress = 50;
+    const baseUrl = `${window.location.origin}${(import.meta as any).env?.BASE_URL ?? '/'}`.replace(/\/\/$/, '');
+    const localWasmBase = `${baseUrl}/mediapipe`;
+    const localModelPath = `${localWasmBase}/face_landmarker.task`;
+    const remoteWasmBase = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm';
+    const remoteModelPath = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
 
-      const modelPath = `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`;
-
+    const createFaceLandmarker = async (
+      wasmBaseUrl: string,
+      modelAssetPath: string,
+      useCpuFallback = false
+    ): Promise<FaceLandmarker> => {
+      const filesetResolver = await FilesetResolver.forVisionTasks(wasmBaseUrl);
       const baseConfig = {
         baseOptions: {
-          modelAssetPath: modelPath,
+          modelAssetPath,
           delegate: 'GPU' as const,
         },
         runningMode: 'VIDEO' as const,
@@ -392,20 +395,42 @@ export class EyeTrackerEngine {
       };
 
       try {
-        this.mediaPipeLoadProgress = 70;
-        this.faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, baseConfig);
-        this.mediaPipeLoadProgress = 100;
+        return await FaceLandmarker.createFromOptions(filesetResolver, baseConfig);
       } catch (gpuErr) {
-        console.warn('GPU delegate failed, falling back to CPU:', gpuErr);
-        this.mediaPipeLoadProgress = 80;
-        this.faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
+        if (!useCpuFallback) throw gpuErr;
+        console.warn('MediaPipe GPU delegate failed, falling back to CPU:', gpuErr);
+        return await FaceLandmarker.createFromOptions(filesetResolver, {
           ...baseConfig,
           baseOptions: { ...baseConfig.baseOptions, delegate: 'CPU' as const },
         });
-        this.mediaPipeLoadProgress = 100;
       }
-      this.mediaPipeReady = true;
-      console.log('MediaPipe FaceLandmarker initialized successfully.');
+    };
+
+    try {
+      this.mediaPipeLoadProgress = 20;
+      let lastError: unknown = null;
+
+      const remoteAttempt = navigator.onLine !== false;
+      if (remoteAttempt) {
+        try {
+          this.mediaPipeLoadProgress = 35;
+          this.faceLandmarker = await createFaceLandmarker(remoteWasmBase, remoteModelPath, true);
+          this.mediaPipeLoadProgress = 100;
+          this.mediaPipeReady = true;
+          console.log('MediaPipe FaceLandmarker initialized from remote CDN.');
+        } catch (remoteErr) {
+          lastError = remoteErr;
+          console.warn('Remote MediaPipe init failed, trying local assets:', remoteErr);
+        }
+      }
+
+      if (!this.faceLandmarker) {
+        this.mediaPipeLoadProgress = 50;
+        this.faceLandmarker = await createFaceLandmarker(localWasmBase, localModelPath, true);
+        this.mediaPipeLoadProgress = 100;
+        this.mediaPipeReady = true;
+        console.log('MediaPipe FaceLandmarker initialized from local assets.');
+      }
     } catch (err) {
       this.mediaPipeLoadError = err instanceof Error ? err.message : 'Unknown error';
       console.warn('MediaPipe initialization fallback to Advanced CV Engine:', err);

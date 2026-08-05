@@ -32,6 +32,54 @@ function getGenAI(): GoogleGenAI {
   return genAIClient;
 }
 
+// ---------------------------------------------------------------------------
+// Unified LLM caller — supports Google Gemini OR a local Ollama model.
+// Controlled by the LLM_PROVIDER env var in .env ("ollama" | "gemini").
+// This lets you run fully offline+private (Ollama) or fall back to the cloud
+// (Gemini) by changing a single line in .env — no code changes required.
+// ---------------------------------------------------------------------------
+type ChatMsg = { role: 'system' | 'user' | 'assistant'; content: string };
+
+async function generateLLMReply(
+  systemInstruction: string,
+  messages: ChatMsg[],
+  temperature: number,
+): Promise<string> {
+  const provider = (process.env.LLM_PROVIDER || 'gemini').toLowerCase();
+
+  // ---- LOCAL LLM PATH (Ollama, OpenAI-compatible endpoint) ----
+  if (provider === 'ollama') {
+    const url = `${process.env.OLLAMA_URL || 'http://localhost:11434'}/v1/chat/completions`;
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: process.env.OLLAMA_MODEL || 'qwen2.5:3b',
+        messages: [{ role: 'system', content: systemInstruction }, ...messages],
+        temperature,
+      }),
+    });
+    if (!resp.ok) {
+      throw new Error(`Ollama HTTP ${resp.status}: ${await resp.text()}`);
+    }
+    const data: any = await resp.json();
+    return data?.choices?.[0]?.message?.content || '';
+  }
+
+  // ---- CLOUD LLM PATH (Google Gemini) ----
+  const ai = getGenAI();
+  const contents = messages.map((m) => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: m.content }],
+  }));
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents,
+    config: { systemInstruction, temperature },
+  });
+  return response.text || '';
+}
+
 // ------------------- API ENDPOINTS ------------------- //
 
 // Healthcheck
@@ -91,33 +139,18 @@ Rules:
 3. Keep responses concise (2-4 paragraphs) with key highlights or bullet points for readability.
 4. MANDATORY SAFETY DISCLAIMER: At the end of every answer, include a short standard medical disclaimer: "Note: OcuRisk is an AI screening tool and does not provide formal medical diagnoses. Please consult an eye care professional (optometrist or ophthalmologist) for clinical examinations."`;
 
-    const ai = getGenAI();
-
-    // Build chat context
-    const contents = [
+    const chatMessages: ChatMsg[] = [
       ...(conversationHistory || []).map((h: { sender: string; text: string }) => ({
-        role: h.sender === 'user' ? 'user' : 'model',
-        parts: [{ text: h.text }],
+        role: (h.sender === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
+        content: h.text,
       })),
-      {
-        role: 'user',
-        parts: [{ text: message }],
-      },
+      { role: 'user', content: message },
     ];
 
-    const response = await ai.models.generateContent({
-      // Migrated from Google's retired experimental Gemini 2.0 Flash model (shut down
-      // June 1, 2026, per its deprecations page). For high volume, gemini-2.5-flash-lite
-      // is cheaper but has somewhat lower reasoning quality.
-      model: 'gemini-2.5-flash',
-      contents,
-      config: {
-        systemInstruction,
-        temperature: 0.7,
-      },
-    });
-
-    let replyText = response.text || 'I have reviewed your scan metrics. Please feel free to ask any questions about your refractive score, accommodative lag, or myopia progression risks.';
+    let replyText = await generateLLMReply(systemInstruction, chatMessages, 0.7);
+    if (!replyText) {
+      replyText = 'I have reviewed your scan metrics. Please feel free to ask any questions about your refractive score, accommodative lag, or myopia progression risks.';
+    }
 
     // LLM Response Safety & Structure Validation
     const validation = validateLLMOutput(replyText);
@@ -188,7 +221,6 @@ app.post('/api/llm-agent/report', async (req, res) => {
       return res.status(400).json({ error: 'Session data is required.' });
     }
 
-    const ai = getGenAI();
     const prompt = `Generate a structured, elegant Personal Eye-Health Summary Report for patient ${session.patient.patientName} (Age ${session.patient.age}).
 
 Patient Profile:
@@ -219,19 +251,11 @@ Please format the summary in 5 markdown sections:
 
 MANDATORY: You MUST include the text "Medical Disclaimer: OcuRisk is an AI screening tool, not a diagnostic device. Please consult a licensed eye care professional." at the bottom.`;
 
-    const response = await ai.models.generateContent({
-      // Migrated from Google's retired experimental Gemini 2.0 Flash model (shut down
-      // June 1, 2026, per its deprecations page). For high volume, gemini-2.5-flash-lite
-      // is cheaper but has somewhat lower reasoning quality.
-      model: 'gemini-2.5-flash',
-      contents: prompt,
-      config: {
-        systemInstruction: 'You are an expert ophthalmic AI clinical writer producing structured, high-clarity patient health reports.',
-        temperature: 0.6,
-      },
-    });
-
-    let reportMarkdown = response.text || '';
+    let reportMarkdown = await generateLLMReply(
+      'You are an expert ophthalmic AI clinical writer producing structured, high-clarity patient health reports.',
+      [{ role: 'user', content: prompt }],
+      0.6,
+    );
     const reportValidation = validateLLMOutput(reportMarkdown, ['Executive Summary', 'Key Risk Drivers', 'Prevention Plan']);
 
     if (!reportValidation.valid) {
