@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-Node 18+, a modern browser, and a webcam.
+Node.js 20, 22, 23, or 24, a modern browser, and a webcam.
 
 ## Setup
 

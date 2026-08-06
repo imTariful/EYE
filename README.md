@@ -65,7 +65,7 @@ See [Calibration and Research Notes](docs/CALIBRATION.md) for the iris-ruler ass
 
 ## Prerequisites
 
-- Node.js 18 or newer
+- Node.js 20, 22, 23, or 24
 - npm
 - A modern browser, preferably Chrome or Edge
 - A webcam or smartphone camera for live tracking features
