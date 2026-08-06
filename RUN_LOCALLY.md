@@ -6,7 +6,15 @@ Node.js 20, 22, 23, or 24, a modern browser, and a webcam.
 
 ## Setup
 
-Run `npm install`, then copy `.env.example` to `.env` and add your Gemini API key.
+Run `npm install`, then create `.env` in the project root. For local offline AI, configure Ollama:
+
+```env
+LLM_PROVIDER=ollama
+OLLAMA_URL=http://localhost:11434
+OLLAMA_MODEL=qwen3:8b
+PORT=3000
+HOST=localhost
+```
 
 ## Run dev
 
@@ -26,7 +34,7 @@ Allow camera access when prompted. Chrome or Edge is recommended.
 
 ## Offline behaviour
 
-The app runs offline and the camera uses on-device vision. AI chat and report generation need internet; fallback text is shown while offline.
+The camera, calculations, localStorage and SQLite persistence run locally. With Ollama running and the configured model downloaded in advance, AI chat and report generation also work without internet. Gemini mode requires internet; fallback text is shown if the selected AI provider is unavailable.
 
 ## Troubleshooting
 

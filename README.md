@@ -85,19 +85,22 @@ The screening workflow can still be explored without a Gemini key, but AI reques
 
 ## Configuration
 
-Copy `.env.example` to a file named `.env` in the project root:
+Create a file named `.env` in the project root. For local offline AI with Ollama:
 
 ```env
-GEMINI_API_KEY=your_google_gemini_api_key
-```
-
-`server.ts` calls `dotenv.config()`, which loads `.env`. `GEMINI_API_KEY` is required for successful live Gemini chat and report requests.
-
-Optional server variables supported by the code are:
-
-```env
+LLM_PROVIDER=ollama
+OLLAMA_URL=http://localhost:11434
+OLLAMA_MODEL=qwen3:8b
 PORT=3000
 HOST=localhost
+SQLITE_DB_PATH=data/ocurisk.db
+```
+
+`server.ts` calls `dotenv.config()`, which loads `.env`. Ollama and the configured model must already be installed for local AI requests. To use optional Gemini instead, set `LLM_PROVIDER=gemini` and add `GEMINI_API_KEY`.
+
+The database-path setting is optional:
+
+```env
 SQLITE_DB_PATH=data/ocurisk.db
 ```
 
@@ -190,13 +193,14 @@ Ambient lighting, camera distance, device optics, flash geometry, focus, movemen
 
 - **Frontend:** React 19, TypeScript, Vite 6
 - **Styling:** Tailwind CSS 4
-- **Backend:** Express 4 with Vite middleware in development
+- **Backend:** Node.js and Express 4 with Vite middleware in development
 - **Computer vision:** MediaPipe Tasks Vision `FaceLandmarker` plus hand-written TypeScript/Canvas algorithms for YCbCr segmentation, Otsu thresholding, pupil-region analysis, red-channel sampling, blur variance, and crescent estimation
 - **Signal processing and optics:** One Euro landmark smoothing, Savitzky-Golay BCEA, Engbert-Kliegl-style microsaccade detection, FFT-based pupil micro-fluctuation analysis, derivative-based vergence-proxy detection, radial pupil-contrast refinement, Howland-style photorefraction, beta-distribution risk visualization, defocus-to-logMAR comparison, illustrative progression calculations, and Thibos power vectors
 - **Charts:** Recharts
 - **Icons:** Lucide React
-- **AI integration:** Google Gemini through `@google/genai`, called only from the Express server
-- **Persistence:** Browser `localStorage`
+- **Local AI:** Ollama with a configurable Qwen model through its OpenAI-compatible localhost endpoint
+- **Optional cloud AI:** Google Gemini through `@google/genai`, called only from the Express server
+- **Persistence:** Browser `localStorage` plus embedded SQLite through `better-sqlite3`
 
 ## License
 

@@ -62,7 +62,7 @@ supplemented by an AI-generated plain-language health report and a conversationa
 
 ### 1.2 How it runs
 
-The platform is a React single-page application (SPA) with a minimal Express backend. All mathematics and computer vision execute client-side. The server has exactly two sensitive roles: **hosting the compiled frontend** and **proxying the LLM** so the API key never reaches the browser. The LLM provider is **pluggable**: Google Gemini online, **or a fully local Ollama model** for zero-data-egress operation.
+The platform is a React single-page application (SPA) with a local Express backend. All mathematics and computer vision execute client-side. Express serves the frontend, mirrors completed sessions into local SQLite, exposes health/session APIs, and proxies the LLM so API keys never reach the browser. The LLM provider is **pluggable**: Google Gemini online, **or a fully local Ollama model** for zero-data-egress operation.
 
 ---
 
@@ -74,6 +74,7 @@ v3.0 advances the prototype from "online-only research demo" toward "deployable,
 |------|--------|----------------|
 | **AI provider** | Pluggable LLM abstraction in `server.ts`: switch Gemini ⇄ **local Ollama-compatible** via `LLM_PROVIDER`. | Eliminates external data egress when local; keeps the same prompt/validation flow. |
 | **CV pipeline** | **3-tier resilience**: online MediaPipe → **local pre-downloaded MediaPipe** → hand-written CV. | Screening still works on a plane, a clinic with locked-down Wi-Fi, or anywhere the CDN is blocked. |
+| **Offline persistence** | Completed sessions are mirrored from browser `localStorage` through Express into `data/ocurisk.db` using SQLite. | Results remain inspectable on the host computer without a remote database or cloud service. |
 | **Showcase demo** | One-click "Load Demo" injects realistic pre-computed sample data and jumps to the dashboard. | Judges and reviewers can explore the full result surface in seconds, no camera needed. |
 | **Result provenance** | Every output surfaces its **source** (measured / self-reported / defaulted / illustrative) and confidence flag. | Makes the "honest about what it can and can't measure" principle visible in the UI itself. |
 | **Disclaimer framing** | Reframed from apologetic to capability-first while keeping full disclosure. | Communicates scope as professional transparency, not an excuse. |
@@ -128,66 +129,41 @@ The user journey is a six-step workflow. Each step collects a distinct evidence 
 
 ### 5.1 High-Level Topology
 
+```mermaid
+flowchart LR
+  U["User and camera"] --> C["React + TypeScript browser client"]
+  C --> V["MediaPipe + Canvas computer vision"]
+  C --> O["Optics and multi-modal risk engine"]
+  C --> H["localStorage browser history"]
+  C -->|"POST /api/sessions and AI requests"| S["Express local server"]
+  S --> D["SQLite data/ocurisk.db"]
+  S --> Q["Ollama + Qwen local LLM"]
+  S -. optional .-> G["Google Gemini cloud LLM"]
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                         CLIENT (Browser)                          │
-│                                                                   │
-│   React 19 SPA  ──  src/App.tsx (central state holder)           │
-│      │                                                            │
-│      ├── Step1Welcome      (consent + demo entry)                 │
-│      ├── Step2Questionnaire ──► PatientProfile                    │
-│      ├── Step3AccommodativeScan ──► AccommodativeData,            │
-│      │                             MicrosaccadeData               │
-│      ├── Step4PhotorefractionScan ─► PhotorefractionData          │
-│      ├── Step5FusionProcessing ───► RiskScoreResult               │
-│      └── Step6ResultsReport (provenance-aware dashboard)          │
-│                                                                   │
-│   Utilities (client-side):                                        │
-│      ├── utils/eyeTracker.ts      (3-tier Computer Vision)        │
-│      └── utils/opticsEngine.ts     (Mathematics & Fusion)        │
-│                                                                   │
-│   Persistence: browser localStorage (ocurisk_scan_history)       │
-└─────────────────────┬────────────────────────────────────────────┘
-                      │  HTTP fetch (AI calls only)
-                      ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                         SERVER (Node.js)                          │
-│   Express  ──  server.ts                                          │
-│      ├── GET  /api/health                                         │
-│      ├── POST /api/llm-agent/chat   ──► LLM provider              │
-│      └── POST /api/llm-agent/report ──► LLM provider              │
-│                                                                   │
-│   Provider selected at boot by env vars in `server.ts`:            │
-│      ┌────────────────────────────────────────────────┐           │
-│      │  LLM_PROVIDER=gemini  →  Gemini cloud backend   │           │
-│      │  LLM_PROVIDER=local   →  local Ollama-compatible │           │
-│      │                         OpenAI-compatible server │           │
-│      └────────────────────────────────────────────────┘           │
-│                                                                   │
-│   Offline CV assets: local MediaPipe is loaded from  `public/mediapipe` when available. │
-│                                                                   │
-│   In dev: Vite middleware mode  |  In prod: serves /dist (SPA)   │
-└──────────────────────────────────────────────────────────────────┘
-```
+
+The browser performs camera analysis and deterministic calculations. Express provides the local API bridge, SQLite persistence, static hosting and LLM proxy. Images remain in the browser; only structured session data is mirrored to SQLite or sent to an explicitly selected LLM provider.
 
 ### 5.2 Architectural Principles
 
-- **Stateless backend.** The server holds no session state; all clinical data lives in the client and is transmitted per-request only when AI features are invoked.
+- **Local persistence with browser fallback.** The server stores completed sessions in SQLite; the browser keeps the existing `localStorage` history as an immediate fallback when the local API is unavailable.
 - **Client-heavy computation.** All computer vision and optical mathematics run in the browser. This keeps the server minimal and reduces latency for interactive scans.
-- **Dependency inversion for the LLM.** The AI provider is accessed through a single neutral interface in `server.ts`, instantiated once at boot. Swapping providers is a configuration change, not a code change.
-- **Gemini API key is optional.** `GEMINI_API_KEY` is only required when `LLM_PROVIDER=gemini`; local mode runs independently with `LLM_PROVIDER=local`.
+- **Environment-driven LLM selection.** Both AI routes call the same `generateLLMReply()` helper, which selects Ollama or Gemini from `LLM_PROVIDER`.
+- **Gemini API key is optional.** `GEMINI_API_KEY` is only required when `LLM_PROVIDER=gemini`; the current local provider value is `LLM_PROVIDER=ollama`.
 - **Local MediaPipe path:** `public/mediapipe` holds bundled WASM and model assets for offline operation.
 - **Graceful degradation everywhere.** Both the CV pipeline and the AI layer fail soft — they never block the user journey.
 
 ### 5.3 Repository Layout
 
 ```
-EYE-fourthbranch/
-├── server.ts                    # Express backend + LLM proxy
+EYE/
+├── server.ts                    # Express backend + local API + LLM proxy
+├── database.ts                  # SQLite schema and session repository
+├── database.test.ts             # SQLite persistence tests
 ├── index.html                   # SPA entry
 ├── vite.config.ts               # Build configuration
 ├── package.json
 ├── .env                         # Provider config (gitignored)
+├── data/                        # Created at runtime; contains ignored ocurisk.db
 ├── public/                      # Static assets served by Vite/Express
 │   └── mediapipe/               # Local MediaPipe runtime + model assets
 │       ├── face_landmarker.task
@@ -244,8 +220,9 @@ EYE-fourthbranch/
 
 | Component | Technology | Purpose |
 |-----------|------------|---------|
-| Runtime | Node.js 18+ | JavaScript runtime |
+| Runtime | Node.js 20, 22, 23, or 24 | JavaScript runtime |
 | HTTP framework | Express 4 | API server |
+| Embedded database | SQLite + `better-sqlite3` | Local session persistence in `data/ocurisk.db` |
 | Dev runner | tsx | TypeScript execution |
 | Production bundler | esbuild | Server bundle to `dist/server.cjs` |
 | AI SDK (online) | `@google/genai` | Gemini LLM access |
@@ -254,8 +231,10 @@ EYE-fourthbranch/
 
 ### 6.3 Persistence
 
-- **No traditional database.** Scan history (max 20 sessions) persists in browser `localStorage` under the key `ocurisk_scan_history`.
-- Suitable for a single-user prototype; the [Future Roadmap](#19-future-roadmap) defines the migration path to a real database.
+- **Browser fallback:** The existing History drawer uses browser `localStorage` under the `ocurisk_scan_history` key, with a maximum of 20 sessions.
+- **Durable local database:** When Step 6 is reached, the browser mirrors the completed session to `POST /api/sessions`. Express stores it in SQLite at `data/ocurisk.db`.
+- **No database server required:** `database.ts` creates the directory, database file, `scan_sessions` schema and indexes automatically on server startup.
+- **Local-only by default:** `ocurisk.db` is excluded from Git and remains on the host computer. It may be inspected with DB Browser for SQLite or SQLiteStudio.
 
 ---
 
@@ -278,12 +257,12 @@ This means the same landmark-quality CV works on a bench with gigabit fiber and 
 | Mode | Provider | Behavior on failure |
 |------|----------|---------------------|
 | **Online** | `LLM_PROVIDER=gemini` | On any error, the route returns a **predefined offline fallback** message/report so the UI never blocks. |
-| **Local** | `LLM_PROVIDER=local` (Ollama at `http://localhost:11434/v1`, etc.) | Same — local-inference failure also yields the predefined fallback. |
-| **Misconfigured** | `LLM_PROVIDER=local` but URL/model missing | Logs a warning and falls back to Gemini, or returns the offline fallback if Gemini is unavailable. |
+| **Local** | `LLM_PROVIDER=ollama` (Ollama at `http://localhost:11434`, etc.) | Same — local-inference failure also yields the predefined fallback. |
+| **Misconfigured** | Ollama URL/model unavailable | The routes return the predefined local fallback text so the UI remains usable. |
 
 ### 7.3 End-to-End Offline Mode
 
-With `LLM_PROVIDER=local` and the locally-bundled CV assets present, OcuRisk runs **completely air-gapped**: no CDN, no cloud LLM, no data leaving the device. This is the configuration recommended for any deployment involving real patient data.
+With `LLM_PROVIDER=ollama`, a locally downloaded model and the locally-bundled CV assets present, OcuRisk runs without runtime cloud dependencies: no cloud LLM and no database server are required. SQLite stores sessions locally in `data/ocurisk.db`; camera processing remains in the browser. Initial installation still requires the application dependencies and local LLM model to be downloaded in advance.
 
 ---
 
@@ -520,47 +499,29 @@ A 5-year projection applies an annual diopter shift of `(finalRisk/100) × 0.85`
 
 ## 12. Backend & LLM Integration (Gemini ⇄ Ollama)
 
-`server.ts` exposes three endpoints. All AI generation goes through the **pluggable provider abstraction** in `server.ts`.
+`server.ts` exposes local health, persistence and AI endpoints. All AI generation goes through the shared `generateLLMReply()` function.
 
-### 12.1 The provider abstraction
+### 12.1 Provider selection
 
-A single neutral interface (`LLMProvider`) is consumed by both routes:
-
-```ts
-interface LLMProvider {
-  readonly id: string;
-  generateContent(
-    messages: LLMChatMessage[],
-    options?: LLMGenerateOptions
-  ): Promise<string>;
-}
-```
-
-Two implementations:
-
-| Provider | Class | Transport | Wire format |
-|----------|-------|-----------|-------------|
-| **Gemini** (online) | `GeminiProvider` | `@google/genai` SDK | `systemInstruction` + `contents[]` |
-| **Local** (offline) | `LocalLLMProvider` | HTTP `fetch` | OpenAI-compatible `/v1/chat/completions` |
-
-`LocalLLMProvider` works with **any** OpenAI-compatible server — **Ollama**, **llama.cpp**, **vLLM**, **LM Studio** — because it uses only the minimal `messages[].role/content` + `temperature` subset of the spec. The route code never branches on which provider is active.
+`generateLLMReply(systemInstruction, messages, temperature)` reads `LLM_PROVIDER` for each request. When the value is `ollama`, it sends an OpenAI-compatible request to `${OLLAMA_URL}/v1/chat/completions`. Any other value currently uses the Gemini SDK with `gemini-2.5-flash`. Both chat and report routes use this same function.
 
 ### 12.2 Configuration (environment-driven)
 
 | Env var | Meaning | Required? |
 |---------|---------|-----------|
-| `LLM_PROVIDER` | `gemini` (default) or `local` | No |
+| `LLM_PROVIDER` | `gemini` (default) or `ollama` | No |
 | `GEMINI_API_KEY` | Gemini key | Only if provider = gemini |
-| `GEMINI_MODEL` | Override `gemini-2.5-flash` | No |
-| `OLLAMA_URL` | e.g. `http://localhost:11434` | If provider = local |
-| `OLLAMA_MODEL` | e.g. `qwen2.5:3b` | If provider = local |
-| `LOCAL_LLM_API_KEY` | Optional bearer token (auth'd servers) | No |
+| `OLLAMA_URL` | e.g. `http://localhost:11434` | If provider = ollama |
+| `OLLAMA_MODEL` | e.g. `qwen3:8b` | If provider = ollama |
+| `SQLITE_DB_PATH` | Optional path override; defaults to `data/ocurisk.db` | No |
 
-If `LLM_PROVIDER=local` but the URL/model are missing, the factory **warns and silently falls back to Gemini** so a misconfiguration never breaks the demo.
+If Ollama or Gemini is unavailable, the route returns predefined fallback content so the result screen remains usable.
 
 ### 12.3 Endpoints
 
-- **Health** — `GET /api/health` — service heartbeat (reports active provider).
+- **Health** — `GET /api/health` — service heartbeat including SQLite connection state.
+- **Database status** — `GET /api/database/status` — reports path, WAL mode and stored-session count.
+- **Sessions** — `/api/sessions` routes create, list, retrieve and delete local SQLite records.
 - **Chat** — `POST /api/llm-agent/chat` — accepts `{ message, session, conversationHistory }`. Builds a system instruction embedding de-identified patient context and forwards to the active provider. Response passes through `validateLLMOutput()`.
 - **Report** — `POST /api/llm-agent/report` — accepts `{ session }`. Builds a structured-report prompt and returns `{ reportMarkdown, generatedAt }`.
 
@@ -619,7 +580,9 @@ Child components receive props and emit updates via callbacks (`onChange`, `onSa
 
 ### 14.2 Persistence
 
-A `useEffect` on `currentStep === 6` serializes the session to `localStorage` (max 20 entries, FIFO). Demo sessions are flagged `demoMode: true` in the stored record.
+A `useEffect` on `currentStep === 6` creates a UUID-backed `ScanSession`, writes it to `localStorage` (maximum 20 entries, FIFO), and asynchronously mirrors it to `POST /api/sessions`. The localStorage write is the browser fallback; the Express endpoint performs an SQLite upsert keyed by the session ID. Demo sessions carry `demoMode: true` in both stores. If the SQLite API is unavailable, the scan remains usable from localStorage and a warning is logged.
+
+The SQLite schema stores summary columns for browsing (`patient_name`, `patient_age`, `spherical_equivalent`, `overall_risk_percent`, `risk_category`, and `demo_mode`) plus the complete nested `ScanSession` in `session_json`. SQLite uses WAL mode, foreign keys, a busy timeout and indexes on creation date and patient name.
 
 ### 14.3 Core Types (excerpt, `types.ts`)
 
@@ -638,11 +601,17 @@ ScanSession          — aggregate snapshot stored in history (incl. demoMode)
 
 | Method | Path | Request Body | Response |
 |--------|------|--------------|----------|
-| GET | `/api/health` | — | `{ status, service, timestamp }` |
+| GET | `/api/health` | — | `{ status, service, databaseConnected, timestamp }` |
+| GET | `/api/database/status` | — | `{ connected, databasePath, journalMode, sessionCount, error }` |
+| GET | `/api/sessions` | optional `?limit=` | `{ sessions, count }` |
+| GET | `/api/sessions/:id` | — | `{ session }` or `404` |
+| POST | `/api/sessions` | complete `ScanSession` JSON | `{ saved, id }` |
+| DELETE | `/api/sessions/:id` | — | `{ deleted }` |
+| DELETE | `/api/sessions` | — | `{ deleted, deletedCount }` |
 | POST | `/api/llm-agent/chat` | `{ message, session, conversationHistory }` | `{ reply, timestamp }` or error with `fallbackReply` |
 | POST | `/api/llm-agent/report` | `{ session }` | `{ reportMarkdown, generatedAt }` or error with fallback markdown |
 
-All AI endpoints degrade gracefully: on any failure, a locally-defined fallback message/report is returned so the UI never blocks. The active LLM provider is reported in server logs at boot.
+The session endpoints are local persistence APIs. AI endpoints degrade gracefully: on any provider failure, a locally-defined fallback message/report is returned so the UI never blocks.
 
 ---
 
@@ -651,16 +620,16 @@ All AI endpoints degrade gracefully: on any failure, a locally-defined fallback 
 ### 16.1 Data Residency
 
 - **Local screening calculations:** camera and uploaded-media analysis execute entirely in the browser. No image data is transmitted to the server.
-- **Persistent data:** scan history resides only in the requesting browser's `localStorage`.
+- **Persistent data:** browser history resides in `localStorage`, and completed sessions are also mirrored to the host-only SQLite file `data/ocurisk.db`. No remote database is used.
 - **AI requests:** when a user invokes chat or report, the session (including any patient identifier, demographics, and measurements) is POSTed to the local server and forwarded to the configured LLM provider.
 
 ### 16.2 The local-LLM privacy advantage
 
-With `LLM_PROVIDER=local`, **the session never leaves the host machine**. This is the single most important privacy property of v3.0: it makes OcuRisk suitable for handling identifiable data without any external data-processing agreement, because no external processor ever sees the data.
+With `LLM_PROVIDER=ollama`, **the session never leaves the host machine** for AI processing. This local mode uses Ollama's localhost API; SQLite also remains on the host. This does not constitute clinical or legal approval for identifiable health data, so consent, access control and deployment policy are still required.
 
 ### 16.3 Key Management
 
-- API keys (`GEMINI_API_KEY`, `LOCAL_LLM_API_KEY`) are loaded server-side from `.env` (gitignored) and are never exposed to the client.
+- `GEMINI_API_KEY` is loaded server-side from `.env` (gitignored) and is never exposed to the client. The current Ollama integration uses an unauthenticated localhost endpoint.
 
 ### 16.4 Privacy Considerations
 
@@ -670,7 +639,7 @@ With `LLM_PROVIDER=local`, **the session never leaves the host machine**. This i
 
 ### 16.5 Input Safety
 
-All LLM responses are post-validated (`validateLLMOutput`) to prevent unmitigated diagnostic claims and to guarantee a medical disclaimer — regardless of which provider produced them.
+LLM responses pass through `validateLLMOutput()` for length, disclaimer, diagnostic-language and report-section checks. Invalid output is logged and receives disclaimer fallback handling, but this lightweight validation is not a substitute for clinical review or a complete AI-safety system.
 
 ---
 
@@ -687,7 +656,7 @@ All LLM responses are post-validated (`validateLLMOutput`) to prevent unmitigate
 | 7 | FFT | Cooley-Tukey radix-2 | Cooley & Tukey (1965) |
 | 8 | Thibos power vectors | M, J0, J45 | Thibos et al. (1997) |
 | 9 | Hyperopic defocus theory | axial-elongation driver | Hung & Wallman (1995); Smith (1998) |
-| 10 | Beta-distribution risk curve | `Beta(α, β)` posterior | Bayesian inference |
+| 10 | Beta-distribution risk curve | Deterministic score mapped to `Beta(α, β)` parameters | Prototype risk visualization |
 | 11 | Outdoor-light protection | retinal dopamine | He et al. (2015) |
 | 12 | Accommodative lag & progression | COMET findings | COMET Group (2013) |
 
@@ -730,7 +699,7 @@ We document these in full because honest scoping is how a screening tool earns t
 ## 19. Future Roadmap
 
 ### 19.1 Privacy & Infrastructure
-- **Real database** (PostgreSQL / Firebase) with longitudinal patient records and a clinician dashboard.
+- **Optional multi-user database** (for example PostgreSQL) with authentication, longitudinal records, audit logging and a clinician dashboard. The current SQLite layer remains the offline single-host store.
 - **On-device quantized model** to move Tier 1/2 entirely in-app and remove even the local-asset fetch.
 
 ### 19.2 Optical Accuracy
@@ -797,12 +766,13 @@ Planned hardware-adapter extensions:
 ## Appendix A — Installation & Operation
 
 ### A.1 Prerequisites
-- Node.js 18+
+- Node.js 20, 22, 23, or 24
 - npm
 - Modern browser (Chrome / Edge recommended)
 - Webcam or smartphone camera
 - For **full online mode**: internet access (MediaPipe CDN + cloud LLM).
 - For **full offline mode**: locally bundled CV assets in `/public` **and** a running local LLM (e.g., Ollama). See Appendix B.
+- No SQLite server installation is required; `better-sqlite3` creates the embedded database automatically during application startup.
 - `GEMINI_API_KEY` for online AI features (optional; app runs without it via fallbacks).
 
 ### A.2 Development
@@ -810,6 +780,8 @@ Planned hardware-adapter extensions:
 npm install
 npm run dev      # starts Express + Vite at http://localhost:3000
 ```
+
+On first launch, the server creates `data/ocurisk.db` and the `scan_sessions` schema. Completed Step 6 sessions are saved to browser localStorage and mirrored into this file.
 
 ### A.3 Production
 ```bash
@@ -828,20 +800,20 @@ npm run clean    # remove dist + server.cjs
 ### A.5 Configuration (`.env`)
 ```
 # --- LLM provider selection ---
-LLM_PROVIDER=gemini            # or: local
+LLM_PROVIDER=ollama            # use gemini for optional cloud AI
 
 # --- Gemini (online) ---
 GEMINI_API_KEY=your_key
-GEMINI_MODEL=gemini-2.5-flash
-
 # --- Local LLM (offline) — e.g. Ollama ---
 OLLAMA_URL=http://localhost:11434
-OLLAMA_MODEL=qwen2.5:3b
-LOCAL_LLM_API_KEY=             # optional, only for auth'd servers
+OLLAMA_MODEL=qwen3:8b
 
 # --- Server ---
 PORT=3000
 HOST=localhost
+
+# --- Optional database path override ---
+SQLITE_DB_PATH=data/ocurisk.db
 ```
 
 ### A.6 Recommended Photorefraction Capture Protocol
@@ -872,7 +844,7 @@ curl -fsSL https://ollama.com/install.sh | sh
 OcuRisk's prompts are designed for general-purpose instruction models. A good quality/size trade-off:
 
 ```bash
-ollama pull llama3.1:8b        # or: mistral, qwen2.5:7b, etc.
+ollama pull qwen3:8b
 ollama serve                   # starts the OpenAI-compatible API on :11434
 ```
 
@@ -880,15 +852,12 @@ ollama serve                   # starts the OpenAI-compatible API on :11434
 
 Set in `.env`:
 ```
-LLM_PROVIDER=local
+LLM_PROVIDER=ollama
 OLLAMA_URL=http://localhost:11434
-OLLAMA_MODEL=qwen2.5:3b
+OLLAMA_MODEL=qwen3:8b
 ```
 
-Restart the server. The boot log will print:
-```
-OcuRisk LLM: local provider (llama3.1:8b @ http://localhost:11434/v1)
-```
+Restart the OcuRisk server after changing `.env`.
 
 ### B.4 Verify
 
@@ -900,10 +869,10 @@ Chat and report requests will now be served entirely from the local model. If th
 
 ### B.5 Other compatible servers
 
-The same `LOCAL_LLM_*` env vars work unchanged against any OpenAI-compatible endpoint:
-- **llama.cpp** — build the server example, point `LOCAL_LLM_BASE_URL` at it.
-- **vLLM** — launch with `--served-model-name <m>`, set `LOCAL_LLM_MODEL=<m>`.
-- **LM Studio** — start the "Local Server", use `http://localhost:1234/v1`.
+The same `OLLAMA_URL` and `OLLAMA_MODEL` settings can target another unauthenticated OpenAI-compatible local endpoint:
+- **llama.cpp** — point `OLLAMA_URL` at its server base URL.
+- **vLLM** — use its OpenAI-compatible base URL and served model name.
+- **LM Studio** — start the Local Server and set `OLLAMA_URL=http://localhost:1234`.
 
 ---
 
