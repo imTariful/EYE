@@ -3,8 +3,19 @@ import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
+import type { ScanSession } from './src/types';
+import {
+  clearScanSessions,
+  deleteScanSession,
+  getDatabaseStatus,
+  getScanSession,
+  initializeDatabase,
+  listScanSessions,
+  saveScanSession,
+} from './database';
 
 dotenv.config();
+initializeDatabase();
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -84,7 +95,103 @@ async function generateLLMReply(
 
 // Healthcheck
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', service: 'OcuRisk-AI-Backend', timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    service: 'OcuRisk-AI-Backend',
+    databaseConnected: getDatabaseStatus().connected,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+function isValidScanSession(value: unknown): value is ScanSession {
+  if (!value || typeof value !== 'object') return false;
+  const session = value as Partial<ScanSession>;
+  return (
+    typeof session.id === 'string' &&
+    session.id.length > 0 &&
+    typeof session.createdAt === 'string' &&
+    !!session.patient &&
+    typeof session.patient.patientName === 'string' &&
+    typeof session.patient.age === 'number' &&
+    !!session.photorefraction &&
+    !!session.accommodative &&
+    !!session.microsaccade &&
+    !!session.riskResult
+  );
+}
+
+// Local SQLite database status for offline demonstrations.
+app.get('/api/database/status', (_req, res) => {
+  const status = getDatabaseStatus();
+  res.status(status.connected ? 200 : 503).json(status);
+});
+
+// List locally persisted scan sessions.
+app.get('/api/sessions', (req, res) => {
+  try {
+    const limit = Number(req.query.limit) || 100;
+    const sessions = listScanSessions(limit);
+    res.json({ sessions, count: sessions.length });
+  } catch (error) {
+    res.status(503).json({
+      error: 'SQLite database is unavailable.',
+      details: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
+app.get('/api/sessions/:id', (req, res) => {
+  try {
+    const session = getScanSession(req.params.id);
+    if (!session) return res.status(404).json({ error: 'Scan session not found.' });
+    res.json({ session });
+  } catch (error) {
+    res.status(503).json({
+      error: 'SQLite database is unavailable.',
+      details: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
+// Mirror a completed browser scan into the local SQLite database.
+app.post('/api/sessions', (req, res) => {
+  try {
+    if (!isValidScanSession(req.body)) {
+      return res.status(400).json({ error: 'A valid completed scan session is required.' });
+    }
+
+    saveScanSession(req.body);
+    res.status(201).json({ saved: true, id: req.body.id });
+  } catch (error) {
+    res.status(503).json({
+      error: 'The scan remains in browser storage, but SQLite persistence failed.',
+      details: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
+app.delete('/api/sessions/:id', (req, res) => {
+  try {
+    const deleted = deleteScanSession(req.params.id);
+    res.status(deleted ? 200 : 404).json({ deleted });
+  } catch (error) {
+    res.status(503).json({
+      error: 'SQLite database is unavailable.',
+      details: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
+app.delete('/api/sessions', (_req, res) => {
+  try {
+    const deletedCount = clearScanSessions();
+    res.json({ deleted: true, deletedCount });
+  } catch (error) {
+    res.status(503).json({
+      error: 'SQLite database is unavailable.',
+      details: error instanceof Error ? error.message : String(error),
+    });
+  }
 });
 
 // Endpoint: AI Eye-Health Agent Chat

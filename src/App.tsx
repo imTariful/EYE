@@ -58,6 +58,27 @@ const DEFAULT_MICROSACCADE: MicrosaccadeData = {
   amblyopiaRisk: 'MODERATE',
 };
 
+async function mirrorSessionToSQLite(session: ScanSession): Promise<void> {
+  try {
+    const response = await fetch('/api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(session),
+    });
+
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      throw new Error(payload?.details || payload?.error || `SQLite API returned ${response.status}`);
+    }
+
+    console.info(`Scan ${session.id} saved to local SQLite database.`);
+  } catch (error) {
+    // Browser history remains the guaranteed fallback, preserving the existing
+    // workflow when the local database is stopped or unavailable.
+    console.warn('SQLite mirror save failed; scan remains in localStorage:', error);
+  }
+}
+
 export default function App() {
   const [currentStep, setCurrentStep] = useState<Step>(1);
   const [completedSteps, setCompletedSteps] = useState<Set<number>>(new Set([1]));
@@ -89,13 +110,14 @@ export default function App() {
   useEffect(() => {
     if (currentStep === 6 && !restoringRef.current) {
       const session: ScanSession = {
-        id: `scan-${Date.now()}`,
+        id: globalThis.crypto?.randomUUID?.() ?? `scan-${Date.now()}`,
         createdAt: new Date().toISOString(),
         patient,
         photorefraction,
         accommodative,
         microsaccade,
         riskResult,
+        demoMode,
       };
 
       setHistory((prev) => {
@@ -107,6 +129,8 @@ export default function App() {
         }
         return updated;
       });
+
+      void mirrorSessionToSQLite(session);
     }
     // Reset the restoring flag after the effect runs
     if (restoringRef.current) {

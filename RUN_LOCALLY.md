@@ -12,6 +12,10 @@ Run `npm install`, then copy `.env.example` to `.env` and add your Gemini API ke
 
 Run `npm run dev`, then open http://localhost:3000 (not port 5173).
 
+The server automatically creates the local SQLite database at `data/ocurisk.db`. No separate database server or manual schema creation is needed.
+
+To inspect saved sessions manually, open `data/ocurisk.db` in DB Browser for SQLite and select the `scan_sessions` table under **Browse Data**.
+
 ## Run prod
 
 Run `npm run build` and then `npm start`.

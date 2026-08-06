@@ -58,3 +58,7 @@ Thumbs.db
 .temp
 .tmp
 server.cjs
+
+# Local SQLite data
+data/*.db
+data/*.db-*

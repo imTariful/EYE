@@ -38,6 +38,7 @@ The repository includes pre-populated example values so the interface can be exp
 - **Image and video upload:** Step 4 supports local image analysis and sampled video-frame analysis with blur-quality checks.
 - **Optional Gemini assistance:** The results screen can request plain-language chat responses and a structured AI health note from Google Gemini through the Express server.
 - **Local scan history:** Up to 20 completed scan sessions are stored in browser `localStorage` and can be restored or cleared from the History drawer.
+- **Local SQLite persistence:** Completed sessions are also mirrored through the local Express server into `data/ocurisk.db`. Browser history remains available if SQLite is temporarily unavailable.
 
 ## Photorefraction Calculation
 
@@ -97,7 +98,10 @@ Optional server variables supported by the code are:
 ```env
 PORT=3000
 HOST=localhost
+SQLITE_DB_PATH=data/ocurisk.db
 ```
+
+`SQLITE_DB_PATH` is optional. When omitted, the server automatically creates `data/ocurisk.db`. The database uses WAL journal mode and creates its schema on first launch; no separate SQLite server or manual schema setup is required.
 
 Do not commit `.env`; it is excluded by `.gitignore`.
 
@@ -145,6 +149,7 @@ npm run preview    # Vite's standalone production preview
 ## Data Privacy and External Data Flow
 
 - Completed scan sessions are stored locally in the browser under the `ocurisk_scan_history` `localStorage` key, with a maximum of 20 sessions.
+- Completed sessions are also mirrored into the local SQLite file at `data/ocurisk.db`. This database remains on the host computer and can be inspected with DB Browser for SQLite or SQLiteStudio.
 - Camera and uploaded-media analysis is performed in the browser; the server has no photo-analysis API.
 - Ordinary local screening calculations do not require sending the session to Gemini.
 - When the user sends an AI chat message, the frontend posts the message, recent conversation history, and the **full scan session** to `POST /api/llm-agent/chat` on the local Express server.
