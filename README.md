@@ -98,12 +98,6 @@ SQLITE_DB_PATH=data/ocurisk.db
 
 `server.ts` calls `dotenv.config()`, which loads `.env`. Ollama and the configured model must already be installed for local AI requests. To use optional Gemini instead, set `LLM_PROVIDER=gemini` and add `GEMINI_API_KEY`.
 
-The database-path setting is optional:
-
-```env
-SQLITE_DB_PATH=data/ocurisk.db
-```
-
 `SQLITE_DB_PATH` is optional. When omitted, the server automatically creates `data/ocurisk.db`. The database uses WAL journal mode and creates its schema on first launch; no separate SQLite server or manual schema setup is required.
 
 Do not commit `.env`; it is excluded by `.gitignore`.
